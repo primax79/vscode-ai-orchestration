@@ -1,0 +1,7 @@
+.git/**
+node_modules/**
+src/**
+tsconfig.json
+esbuild.config.mjs
+.vscodeignore
+*.vsix
