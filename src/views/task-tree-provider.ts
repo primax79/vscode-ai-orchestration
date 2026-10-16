@@ -9,14 +9,14 @@ export class TaskTreeItem extends vscode.TreeItem {
     public readonly workspaceRoot: string
   ) {
     super(
-      `[${task.priority}] ${task.id}: ${task.title}`,
+      `[${task.priority || 'P1'}] ${task.id}: ${task.title}`,
       vscode.TreeItemCollapsibleState.None
     );
 
     this.tooltip = new vscode.MarkdownString(
       `### ${task.id}: ${task.title}\n\n` +
       `- **State:** \`${task.state}\`\n` +
-      `- **Priority:** \`${task.priority}\` (${task.priority_reason || 'none'})\n` +
+      `- **Priority:** \`${task.priority || 'P1'}\` (${task.priority_reason || 'none'})\n` +
       `- **Assignee:** \`${task.executor || 'self'}\`\n` +
       `- **Category:** \`${task.category}\`\n` +
       (task.handoff ? `\n**Handoff Prompt:**\n\`\`\`\n${task.handoff}\n\`\`\`\n` : '')
@@ -35,11 +35,12 @@ export class TaskTreeItem extends vscode.TreeItem {
       this.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('charts.blue'));
     } else if (task.state === 'verified') {
       this.iconPath = new vscode.ThemeIcon('verified', new vscode.ThemeColor('charts.green'));
+    } else if (task.state === 'done') {
+      this.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'));
     } else {
       this.iconPath = new vscode.ThemeIcon('circle-outline');
     }
 
-    // Click command opens the markdown file
     if (task.file_path && fs.existsSync(task.file_path)) {
       this.command = {
         command: 'vscode.open',
@@ -52,23 +53,36 @@ export class TaskTreeItem extends vscode.TreeItem {
 
 export class InitiativeTreeItem extends vscode.TreeItem {
   constructor(
-    public readonly initiative: InitiativeItem,
+    public readonly initiative: any,
     public readonly workspaceRoot: string
   ) {
+    const hasSubtasks = (initiative.tasks || []).length > 0;
     super(
-      `Initiative #${initiative.id}: ${initiative.title}`,
-      vscode.TreeItemCollapsibleState.None
+      `#${initiative.id}: ${initiative.title}`,
+      hasSubtasks
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.None
     );
 
-    this.description = `${initiative.tasks_count} subtasks`;
-    this.iconPath = new vscode.ThemeIcon('layers', new vscode.ThemeColor('charts.purple'));
-    this.tooltip = `Initiative ${initiative.id}: ${initiative.title}\nPlan: ${initiative.plan_path}`;
+    const status = initiative.status || (initiative.location === 'merged' ? 'done' : 'active');
+    this.description = `${status} (${(initiative.tasks || []).length} tasks)`;
 
-    if (initiative.plan_path && fs.existsSync(initiative.plan_path)) {
+    if (status === 'done') {
+      this.iconPath = new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('charts.green'));
+    } else if (status === 'in progress') {
+      this.iconPath = new vscode.ThemeIcon('sync', new vscode.ThemeColor('charts.blue'));
+    } else {
+      this.iconPath = new vscode.ThemeIcon('layers', new vscode.ThemeColor('charts.purple'));
+    }
+
+    this.tooltip = `Initiative ${initiative.id}: ${initiative.title}\nStatus: ${status}\nFolder: ${initiative.folder}`;
+
+    const planPath = path.join(workspaceRoot, 'tasks', initiative.rel_path);
+    if (fs.existsSync(planPath)) {
       this.command = {
         command: 'vscode.open',
         title: 'Open Initiative Plan',
-        arguments: [vscode.Uri.file(initiative.plan_path)],
+        arguments: [vscode.Uri.file(planPath)],
       };
     }
   }
@@ -121,10 +135,6 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
   }
 
   async getChildren(element?: vscode.TreeItem): Promise<vscode.TreeItem[]> {
-    if (element) {
-      return [];
-    }
-
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
       return [new vscode.TreeItem('No workspace open')];
@@ -143,15 +153,47 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
         this.cachedResult = await this.cliClient.listTasks(rootPath);
       }
 
-      const tasks = this.cachedResult.emergent_tasks || [];
+      const allTasks = this.cachedResult.all_tasks || this.cachedResult.emergent_tasks || [];
       const initiatives = this.cachedResult.initiatives || [];
 
+      // If expanding an initiative, show its subtasks!
+      if (element instanceof InitiativeTreeItem) {
+        const init = element.initiative;
+        const subtasks = (init.tasks || []).map((st: any) => {
+          const item = new vscode.TreeItem(
+            `[${st.state || init.status || 'open'}] ${st.id}: ${st.title}`,
+            vscode.TreeItemCollapsibleState.None
+          );
+          item.description = st.state || init.status;
+          item.iconPath = st.state === 'done' || init.status === 'done'
+            ? new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'))
+            : st.state === 'verified'
+            ? new vscode.ThemeIcon('verified', new vscode.ThemeColor('charts.green'))
+            : new vscode.ThemeIcon('circle-outline');
+          const planPath = path.join(rootPath, 'tasks', init.rel_path);
+          item.command = {
+            command: 'vscode.open',
+            title: 'Open Plan',
+            arguments: [vscode.Uri.file(planPath)],
+          };
+          return item;
+        });
+        return subtasks;
+      }
+
       if (this.viewType === 'nextUp') {
-        const nextUps = tasks.filter((t) => t.next_up === 'yes' && t.state !== 'done');
-        if (nextUps.length === 0) {
-          return [new vscode.TreeItem('No tasks currently in Next Up queue')];
+        const nextUps = allTasks.filter((t) => t.next_up === 'yes' && t.state !== 'done');
+        if (nextUps.length > 0) {
+          return nextUps.map((t) => new TaskTreeItem(t, rootPath));
         }
-        return nextUps.map((t) => new TaskTreeItem(t, rootPath));
+        // Fallback: show active in-progress tasks
+        const active = allTasks.filter((t) => t.state !== 'done');
+        if (active.length === 0) {
+          const allDone = new vscode.TreeItem('All tasks completed!');
+          allDone.iconPath = new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('charts.green'));
+          return [allDone];
+        }
+        return active.slice(0, 10).map((t) => new TaskTreeItem(t, rootPath));
       }
 
       if (this.viewType === 'initiatives') {
@@ -162,7 +204,7 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
       }
 
       if (this.viewType === 'decisions') {
-        const decisions = tasks.filter(
+        const decisions = allTasks.filter(
           (t) => (t.decider && t.decider !== '-') || t.state === 'waiting'
         );
         if (decisions.length === 0) {

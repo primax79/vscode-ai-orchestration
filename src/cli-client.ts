@@ -37,6 +37,7 @@ export interface TaskListResult {
   tasks_dir: string;
   emergent_tasks: TaskItem[];
   initiatives: InitiativeItem[];
+  all_tasks?: TaskItem[];
 }
 
 export class CliClient {
