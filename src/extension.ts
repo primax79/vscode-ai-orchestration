@@ -73,6 +73,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   const nextUpProvider = new TaskTreeProvider(cliClient, 'nextUp', getBoundRoot);
   const initiativesProvider = new TaskTreeProvider(cliClient, 'initiatives', getBoundRoot);
+  const useCasesProvider = new TaskTreeProvider(cliClient, 'useCases', getBoundRoot);
   const decisionsProvider = new DecisionsTreeProvider(cliClient, getBoundRoot, () => {
     questionNotifier.checkQuestions(false);
   });
@@ -85,6 +86,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('aiOrchestration.nextUpView', nextUpProvider),
     vscode.window.registerTreeDataProvider('aiOrchestration.initiativesView', initiativesProvider),
+    vscode.window.registerTreeDataProvider('aiOrchestration.useCasesView', useCasesProvider),
     decisionsTreeView
   );
 
@@ -103,6 +105,7 @@ export function activate(context: vscode.ExtensionContext) {
   const refreshAllNow = () => {
     nextUpProvider.refresh();
     initiativesProvider.refresh();
+    useCasesProvider.refresh();
     decisionsProvider.refresh();
     if (DashboardPanel.currentPanel) {
       DashboardPanel.currentPanel.notifyTasksChanged();

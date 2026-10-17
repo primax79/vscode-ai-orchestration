@@ -131,7 +131,7 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
 
   constructor(
     private cliClient: CliClient,
-    private viewType: 'nextUp' | 'initiatives' | 'decisions',
+    private viewType: 'nextUp' | 'initiatives' | 'decisions' | 'useCases',
     private getRootPath?: () => string
   ) {}
 
@@ -224,6 +224,39 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
           this.decisionsDelegate = new DecisionsTreeProvider(this.cliClient, this.getRootPath);
         }
         return this.decisionsDelegate.getChildren(element);
+      }
+
+      if (this.viewType === 'useCases') {
+        const res = await this.cliClient.runJsonCommand<any>(['use-cases', 'list', '--tasks-dir', tasksDir], rootPath);
+        const ucs = res.use_cases || [];
+        if (ucs.length === 0) {
+          const empty = new vscode.TreeItem('No use cases found in tasks/use-cases/');
+          empty.iconPath = new vscode.ThemeIcon('info');
+          return [empty];
+        }
+        return ucs.map((u: any) => {
+          const item = new vscode.TreeItem(
+            `[${u.id}] ${u.title}`,
+            vscode.TreeItemCollapsibleState.None
+          );
+          item.description = `${u.status} (${u.actor})`;
+          item.tooltip = `${u.id}: ${u.title}\nActor: ${u.actor}\nStatus: ${u.status}\nLast verdict: ${u.last_verdict || 'untested'}`;
+          if (u.last_verdict === 'pass') {
+            item.iconPath = new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('charts.green'));
+          } else if (u.last_verdict === 'fail') {
+            item.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('charts.red'));
+          } else {
+            item.iconPath = new vscode.ThemeIcon('target', new vscode.ThemeColor('charts.blue'));
+          }
+          if (u.file_path && fs.existsSync(u.file_path)) {
+            item.command = {
+              command: 'vscode.open',
+              title: 'Open Use Case',
+              arguments: [vscode.Uri.file(u.file_path)],
+            };
+          }
+          return item;
+        });
       }
 
       return [];

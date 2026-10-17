@@ -426,6 +426,44 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     if (payload?.decider) args.push('--decider', String(payload.decider));
     return args;
   },
+  getUseCases: (payload, root) => {
+    const args = ['use-cases', 'list', '--tasks-dir', path.join(root, 'tasks')];
+    if (payload?.status && payload.status !== 'all') args.push('--status', String(payload.status));
+    return args;
+  },
+  getUseCase: (payload, root) => ['use-cases', 'show', String(payload?.id || payload?.uc_id), '--tasks-dir', path.join(root, 'tasks')],
+  createUseCase: (payload, root) => {
+    const args = [
+      'use-cases', 'create',
+      '--id', String(payload?.id),
+      '--title', String(payload?.title),
+      '--tasks-dir', path.join(root, 'tasks'),
+    ];
+    if (payload?.actor) args.push('--actor', String(payload.actor));
+    if (payload?.status) args.push('--status', String(payload.status));
+    if (payload?.priority) args.push('--priority', String(payload.priority));
+    if (payload?.linked_tasks) {
+      const lt = Array.isArray(payload.linked_tasks) ? payload.linked_tasks.join(',') : String(payload.linked_tasks);
+      args.push('--linked-tasks', lt);
+    }
+    if (payload?.verification_command) args.push('--verification-command', String(payload.verification_command));
+    if (payload?.description) args.push('--description', String(payload.description));
+    if (payload?.preconditions) args.push('--preconditions', String(payload.preconditions));
+    if (payload?.scenario) args.push('--scenario', String(payload.scenario));
+    return args;
+  },
+  validateUseCase: (payload, root) => {
+    const args = ['use-cases', 'validate', String(payload?.id || payload?.uc_id), '--tasks-dir', path.join(root, 'tasks')];
+    if (payload?.timeout) args.push('--timeout', String(payload.timeout));
+    if (payload?.actor) args.push('--actor', String(payload.actor));
+    return args;
+  },
+  runValidationCampaign: (payload, root) => {
+    const args = ['use-cases', 'campaign', '--tasks-dir', path.join(root, 'tasks')];
+    if (payload?.filter_actor) args.push('--filter-actor', String(payload.filter_actor));
+    if (payload?.timeout) args.push('--timeout', String(payload.timeout));
+    return args;
+  },
 };
 
 export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {

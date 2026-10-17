@@ -54,6 +54,11 @@
           "id": "aiOrchestration.decisionsView",
           "name": "Decisions Waiting",
           "contextualTitle": "Decisions Waiting on User"
+        },
+        {
+          "id": "aiOrchestration.useCasesView",
+          "name": "Use Cases & Validation",
+          "contextualTitle": "Product Use Cases & E2E Validation"
         }
       ]
     },
