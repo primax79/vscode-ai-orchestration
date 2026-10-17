@@ -120,6 +120,10 @@ export class QuestionNotifier implements vscode.Disposable {
   private statusBarItem: vscode.StatusBarItem;
   private debounceTimer: NodeJS.Timeout | null = null;
   private disposables: vscode.Disposable[] = [];
+  // Checks are serialized: concurrent callers (tree refresh + file watcher) must not
+  // read the same persisted set and toast the same question twice.
+  private inFlight: Promise<QuestionDiffResult> | null = null;
+  private rerunRequested = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -154,6 +158,26 @@ export class QuestionNotifier implements vscode.Disposable {
   }
 
   public async checkQuestions(forceInitial: boolean = false): Promise<QuestionDiffResult> {
+    if (this.inFlight) {
+      this.rerunRequested = true;
+      return this.inFlight;
+    }
+    this.inFlight = (async () => {
+      let result = await this.runCheck(forceInitial);
+      while (this.rerunRequested) {
+        this.rerunRequested = false;
+        result = await this.runCheck(false);
+      }
+      return result;
+    })();
+    try {
+      return await this.inFlight;
+    } finally {
+      this.inFlight = null;
+    }
+  }
+
+  private async runCheck(forceInitial: boolean): Promise<QuestionDiffResult> {
     const root = this.getBoundRoot();
     if (!root || !fs.existsSync(root)) {
       this.updateStatusBar(0);
@@ -184,7 +208,12 @@ export class QuestionNotifier implements vscode.Disposable {
       this.previousOpenIds = new Set(questions.map((q: any) => q.id));
 
       // Persist notified IDs in workspaceState (key per bound workspace folder)
-      await this.context.workspaceState.update(stateKey, Array.from(result.newNotifiedSet));
+      // Only currently open ids are kept, so the stored set stays bounded.
+      const openIds = new Set(questions.map((q: any) => q.id));
+      await this.context.workspaceState.update(
+        stateKey,
+        Array.from(result.newNotifiedSet).filter((id) => openIds.has(id))
+      );
 
       // Update status bar badge & warning background
       this.updateStatusBar(result.count);
