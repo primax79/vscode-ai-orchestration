@@ -37,6 +37,8 @@ export class TaskTreeItem extends vscode.TreeItem {
       this.iconPath = new vscode.ThemeIcon('flame', new vscode.ThemeColor('errorForeground'));
     } else if (task.priority === 'P1') {
       this.iconPath = new vscode.ThemeIcon('issue-opened', new vscode.ThemeColor('charts.orange'));
+    } else if (task.state === 'paused') {
+      this.iconPath = new vscode.ThemeIcon('debug-pause', new vscode.ThemeColor('charts.yellow'));
     } else if (task.state === 'delivered') {
       this.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('charts.blue'));
     } else if (task.state === 'verified') {
