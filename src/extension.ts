@@ -13,6 +13,13 @@ import {
 } from './views/decisions-tree-provider';
 import { DashboardPanel } from './views/dashboard-panel';
 import { WorkspaceManager } from './workspace-manager';
+import {
+  QuestionNotifier,
+  diffQuestions,
+  formatQuestionNotification,
+  formatBatchNotification,
+  formatStatusBarTooltip,
+} from './question-notifier';
 
 export {
   DecisionsTreeProvider,
@@ -21,6 +28,11 @@ export {
   getDecisionsTreeData,
   getBlockedTaskIds,
   groupOpenQuestions,
+  QuestionNotifier,
+  diffQuestions,
+  formatQuestionNotification,
+  formatBatchNotification,
+  formatStatusBarTooltip,
 };
 
 export function activate(context: vscode.ExtensionContext) {
@@ -38,9 +50,14 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Tree View Providers (bound to current workspace folder)
   const getBoundRoot = () => workspaceManager.getBoundWorkspaceFolder();
+  const questionNotifier = new QuestionNotifier(context, cliClient, getBoundRoot);
+  context.subscriptions.push(questionNotifier);
+
   const nextUpProvider = new TaskTreeProvider(cliClient, 'nextUp', getBoundRoot);
   const initiativesProvider = new TaskTreeProvider(cliClient, 'initiatives', getBoundRoot);
-  const decisionsProvider = new DecisionsTreeProvider(cliClient, getBoundRoot);
+  const decisionsProvider = new DecisionsTreeProvider(cliClient, getBoundRoot, () => {
+    questionNotifier.checkQuestions(false);
+  });
 
   const decisionsTreeView = vscode.window.createTreeView('aiOrchestration.decisionsView', {
     treeDataProvider: decisionsProvider,
@@ -62,6 +79,7 @@ export function activate(context: vscode.ExtensionContext) {
       DashboardPanel.currentPanel.notifyQuestionsChanged();
     }
     updateStatusBarCount();
+    questionNotifier.checkQuestions(false);
   };
 
   const updateStatusBarCount = async () => {
@@ -124,6 +142,12 @@ export function activate(context: vscode.ExtensionContext) {
       await vscode.commands.executeCommand('aiOrchestration.openDashboard', {
         tab: 'decisions',
         questionId,
+      });
+    }),
+
+    vscode.commands.registerCommand('aiOrchestration.openDecisions', async () => {
+      await vscode.commands.executeCommand('aiOrchestration.openDashboard', {
+        tab: 'decisions',
       });
     }),
 
@@ -194,11 +218,30 @@ export function activate(context: vscode.ExtensionContext) {
       const questionsWatcher = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(bound, 'tasks/questions/**')
       );
-      questionsWatcher.onDidChange(() => refreshAll());
-      questionsWatcher.onDidCreate(() => refreshAll());
-      questionsWatcher.onDidDelete(() => refreshAll());
+      let questionsDebounceTimer: NodeJS.Timeout | null = null;
+      const onQuestionsChangedDebounced = () => {
+        if (questionsDebounceTimer) {
+          clearTimeout(questionsDebounceTimer);
+        }
+        questionsDebounceTimer = setTimeout(() => {
+          questionsDebounceTimer = null;
+          refreshAll();
+        }, 500);
+      };
+      questionsWatcher.onDidChange(onQuestionsChangedDebounced);
+      questionsWatcher.onDidCreate(onQuestionsChangedDebounced);
+      questionsWatcher.onDidDelete(onQuestionsChangedDebounced);
 
-      activeWatchers.push(tasksWatcher, questionsWatcher);
+      activeWatchers.push(
+        tasksWatcher,
+        questionsWatcher,
+        new vscode.Disposable(() => {
+          if (questionsDebounceTimer) {
+            clearTimeout(questionsDebounceTimer);
+            questionsDebounceTimer = null;
+          }
+        })
+      );
     }
   };
   setupWatcherForBoundFolder();
@@ -214,6 +257,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Initial load
   updateStatusBarCount();
   decisionsProvider.updateBadge();
+  questionNotifier.checkQuestions(true);
   outputChannel.appendLine('AI Orchestration extension activated.');
 }
 

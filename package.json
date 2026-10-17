@@ -23,6 +23,7 @@
     "onStartupFinished",
     "onCommand:aiOrchestration.openDashboard",
     "onCommand:aiOrchestration.openDecision",
+    "onCommand:aiOrchestration.openDecisions",
     "onView:aiOrchestration.nextUpView",
     "onView:aiOrchestration.decisionsView"
   ],
@@ -66,6 +67,12 @@
       {
         "command": "aiOrchestration.openDecision",
         "title": "Open Decision in Dashboard",
+        "category": "AI Orchestration",
+        "icon": "$(question)"
+      },
+      {
+        "command": "aiOrchestration.openDecisions",
+        "title": "Open Decisions in Dashboard",
         "category": "AI Orchestration",
         "icon": "$(question)"
       },
@@ -143,6 +150,11 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically synchronize 00-INDEX.md when a task file under tasks/ is saved."
+        },
+        "aiOrchestration.notifyNewQuestions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show notification toasts when new blocking decisions arrive."
         }
       }
     }
@@ -153,7 +165,7 @@
     "compile": "tsc -p . --noEmit && node esbuild.config.mjs",
     "vscode:prepublish": "npm run compile",
     "sync-webview": "node scripts/sync-webview.mjs",
-    "test": "node scripts/test-bridge-parity.mjs && node scripts/test-decisions-tree.mjs"
+    "test": "node scripts/test-bridge-parity.mjs && node scripts/test-decisions-tree.mjs && node scripts/test-question-notifier.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",

@@ -184,7 +184,8 @@ export class DecisionsTreeProvider implements vscode.TreeDataProvider<vscode.Tre
 
   constructor(
     private cliClient: CliClient,
-    private getRootPath?: () => string
+    private getRootPath?: () => string,
+    private onRefresh?: () => void
   ) {}
 
   public bindTreeView(treeView: vscode.TreeView<vscode.TreeItem>) {
@@ -201,6 +202,9 @@ export class DecisionsTreeProvider implements vscode.TreeDataProvider<vscode.Tre
     this.cachedGroups = null;
     this._onDidChangeTreeData.fire();
     this.updateBadge();
+    if (this.onRefresh) {
+      this.onRefresh();
+    }
   }
 
   public async updateBadge(): Promise<void> {
