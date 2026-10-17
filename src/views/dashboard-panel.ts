@@ -8,7 +8,84 @@ export type CliArgBuilder = (payload: any, root: string) => string[];
 export type CustomHandler = (panel: DashboardPanel, payload: any, root: string) => Promise<any>;
 export type MessageHandler = (panel: DashboardPanel, payload: any, root: string) => Promise<any>;
 
+// Run handlers (07.9): same CLI arguments as the web backend (ai-orchestration-ui/backend/server.py).
+const RUN_ID_RE = /^\d{8}-\d{6}-[A-Za-z0-9.]+-(kilo|claude|codex)-[0-9a-f]{4}$/;
+const runId = (payload: any): string => {
+  const id = String(payload?.runId || payload?.run_id || '');
+  if (!RUN_ID_RE.test(id)) {
+    throw new Error(`Invalid run ID ${JSON.stringify(id)}`);
+  }
+  return id;
+};
+const runRequestArgs = (payload: any): string[] => {
+  const args: string[] = [];
+  for (const [key, flag] of [
+    ['mode', '--mode'], ['tool', '--tool'], ['profile', '--profile'], ['model', '--model'],
+    ['variant', '--variant'], ['effort', '--effort'], ['isolation', '--isolation'],
+    ['target_run', '--target-run'], ['instructions', '--instructions'],
+  ] as const) {
+    if (payload?.[key]) args.push(flag, String(payload[key]));
+  }
+  if (payload?.allow_same_tool) args.push('--allow-same-tool');
+  if (payload?.allow_dirty_base) args.push('--allow-dirty-base');
+  if (payload?.force) args.push('--force');
+  return args;
+};
+const requireTask = (payload: any): string => {
+  const task = String(payload?.task || '');
+  if (!task) throw new Error('task is required');
+  return task;
+};
+
 export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
+  getRunOptions: (payload, root) => ['run', 'options', '--task', requireTask(payload), '--workspace', root],
+  previewRun: (payload, root) => ['run', 'preview', '--task', requireTask(payload), '--workspace', root, ...runRequestArgs(payload)],
+  startRun: (payload, root) => {
+    if (!payload?.expect_plan_hash) throw new Error('expect_plan_hash is required');
+    return ['run', 'start', '--task', requireTask(payload), '--expect-plan-hash', String(payload.expect_plan_hash),
+      '--requested-by', 'vscode', '--workspace', root, ...runRequestArgs(payload)];
+  },
+  continueRun: (payload, root) => {
+    const args = ['run', 'start', '--continue', runId(payload), '--requested-by', 'vscode', '--workspace', root];
+    if (payload?.instructions) args.push('--instructions', String(payload.instructions));
+    if (payload?.expect_plan_hash) args.push('--expect-plan-hash', String(payload.expect_plan_hash));
+    return args;
+  },
+  listRuns: (payload, root) => {
+    const args = ['run', 'list', '--workspace', root];
+    if (payload?.task) args.push('--task', String(payload.task));
+    if (payload?.active) args.push('--active');
+    return args;
+  },
+  getRun: (payload, root) => ['run', 'show', runId(payload), '--workspace', root],
+  getRunLogs: (payload, root) => {
+    const args = ['run', 'logs', runId(payload), '--workspace', root];
+    if (payload?.since_offset !== undefined && payload?.since_offset !== null) args.push('--since-offset', String(payload.since_offset));
+    if (payload?.tail !== undefined && payload?.tail !== null) args.push('--tail', String(payload.tail));
+    return args;
+  },
+  cancelRun: (payload, root) => ['run', 'cancel', runId(payload), '--workspace', root],
+  markDeliveredRun: (payload, root) => {
+    const args = ['run', 'mark-delivered', runId(payload), '--workspace', root];
+    const h = payload?.expect_task_hash || payload?.expect_task_sha256;
+    if (h) args.push('--expect-task-hash', String(h));
+    return args;
+  },
+  applyVerdictRun: (payload, root) => {
+    const args = payload?.panel_id
+      ? ['run', 'apply-verdict', '--panel', String(payload.panel_id), '--workspace', root]
+      : ['run', 'apply-verdict', runId(payload), '--workspace', root];
+    const h = payload?.expect_task_hash || payload?.expect_task_sha256;
+    if (h) args.push('--expect-task-hash', String(h));
+    return args;
+  },
+  cleanupRun: (payload, root) => {
+    const args = ['run', 'cleanup', runId(payload), '--workspace', root];
+    if (payload?.discard) args.push('--discard');
+    if (payload?.dry_run) args.push('--dry-run');
+    if (payload?.expect_plan_hash) args.push('--expect-plan-hash', String(payload.expect_plan_hash), '--requested-by', 'vscode');
+    return args;
+  },
   getTasks: (payload, root) => ['tasks', 'list', '--tasks-dir', path.join(root, 'tasks')],
   validateTasks: (payload, root) => ['tasks', 'validate', '--tasks-dir', path.join(root, 'tasks')],
   transitionTask: (payload, root) => {
@@ -368,6 +445,11 @@ for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
       } catch {}
       if (panel.onTasksUpdated) panel.onTasksUpdated();
     } else if (
+      type === 'startRun' ||
+      type === 'continueRun' ||
+      type === 'cancelRun' ||
+      type === 'markDeliveredRun' ||
+      type === 'applyVerdictRun' ||
       type === 'syncIndex' ||
       type === 'applyAgentsMd' ||
       type === 'answerQuestion' ||
