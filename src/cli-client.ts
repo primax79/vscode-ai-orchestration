@@ -175,6 +175,7 @@ export class CliClient {
     if (workspaceRoot) {
       candidates.push(
         path.join(workspaceRoot, 'bin', 'ai-orch'),
+        path.join(workspaceRoot, 'ai-orchestration', 'bin', 'ai-orch'),
         path.join(workspaceRoot, '..', 'ai-orchestration', 'bin', 'ai-orch')
       );
 
@@ -190,8 +191,23 @@ export class CliClient {
         cur = parent;
       }
     }
+    // PATH (VS Code started from the Dock does not inherit the login shell PATH,
+    // so the usual user bin directories are checked explicitly as well).
+    const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+    if (home) {
+      pathDirs.push(path.join(home, '.local', 'bin'), path.join(home, 'bin'));
+    }
+    pathDirs.push('/opt/homebrew/bin', '/usr/local/bin');
+    for (const dir of pathDirs) {
+      const cand = path.join(dir, 'ai-orch');
+      if (!candidates.includes(cand)) {
+        candidates.push(cand);
+      }
+    }
     if (home) {
       candidates.push(
+        // Claude Code keeps a full clone of the ai-orchestration marketplace repo here
+        path.join(home, '.claude', 'plugins', 'marketplaces', 'ai-orchestration', 'bin', 'ai-orch'),
         path.join(home, '.ai-orchestration', 'repos', 'ai-orchestration', 'bin', 'ai-orch')
       );
     }
