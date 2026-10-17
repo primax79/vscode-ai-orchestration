@@ -2,7 +2,7 @@
   "name": "vscode-ai-orchestration",
   "displayName": "AI Orchestration & Task Manager",
   "description": "Task backlog management, worktree execution control, and multi-agent independent verification for Kilo, Claude, and Codex.",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "publisher": "AlfredoOliviero",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -165,7 +165,7 @@
     "compile": "tsc -p . --noEmit && node esbuild.config.mjs",
     "vscode:prepublish": "npm run compile",
     "sync-webview": "node scripts/sync-webview.mjs",
-    "test": "node scripts/test-bridge-parity.mjs && node scripts/test-decisions-tree.mjs && node scripts/test-question-notifier.mjs && node scripts/test-cli-guard.mjs && node scripts/test-refresh-loop.mjs"
+    "test": "node scripts/test-bridge-parity.mjs && node scripts/test-decisions-tree.mjs && node scripts/test-question-notifier.mjs && node scripts/test-cli-guard.mjs && node scripts/test-refresh-loop.mjs && node scripts/test-task-detail.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",

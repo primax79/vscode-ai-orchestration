@@ -11,7 +11,7 @@ import {
   getBlockedTaskIds,
   groupOpenQuestions,
 } from './views/decisions-tree-provider';
-import { DashboardPanel } from './views/dashboard-panel';
+import { DashboardPanel, HANDLER_MAP } from './views/dashboard-panel';
 import { WorkspaceManager } from './workspace-manager';
 import {
   QuestionNotifier,
@@ -22,6 +22,7 @@ import {
 } from './question-notifier';
 
 export {
+  HANDLER_MAP,
   DashboardPanel,
   CliClient,
   DecisionsTreeProvider,

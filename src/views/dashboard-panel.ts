@@ -322,7 +322,61 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
       err.status = 400;
       throw err;
     }
+    if (!/^(T\d{3,}|\d{2,}\.\d+|INIT-\d{2,})$/.test(String(taskId))) {
+      const err: any = new Error(`Invalid task id ${JSON.stringify(taskId)}`);
+      err.status = 400;
+      throw err;
+    }
     const tasksDir = path.join(root, 'tasks');
+
+    // Initiative tasks (NN.T) and synthetic initiative cards (INIT-NN) live in plan.md
+    // (same behaviour as the web backend's api_get_task_detail).
+    if (!String(taskId).startsWith('T')) {
+      const id = String(taskId);
+      const initId = id.startsWith('INIT-') ? id.slice(5) : id.split('.')[0];
+      const plan = [tasksDir, path.join(tasksDir, 'done')]
+        .flatMap((base) => (fs.existsSync(base) ? fs.readdirSync(base, { withFileTypes: true }) : [])
+          .filter((d) => d.isDirectory() && d.name.startsWith(`${initId}-`))
+          .map((d) => path.join(base, d.name, 'plan.md')))
+        .find((f) => fs.existsSync(f));
+      if (!plan) {
+        const err: any = new Error(`Plan for initiative ${initId} not found`);
+        err.status = 404;
+        throw err;
+      }
+      const planText = fs.readFileSync(plan, 'utf-8');
+      let content: string | null = planText;
+      if (!id.startsWith('INIT-')) {
+        const lines = planText.split('\n');
+        const esc = id.replace('.', '\\.');
+        const head = new RegExp(`^###\\s+${esc}\\s+[\u2014\u2013-]\\s+`);
+        const start = lines.findIndex((l) => head.test(l));
+        if (start < 0) {
+          content = null;
+        } else {
+          let end = lines.length;
+          for (let j = start + 1; j < lines.length; j++) {
+            if (/^#{1,3}\s/.test(lines[j])) { end = j; break; }
+          }
+          content = lines.slice(start, end).join('\n').trimEnd() + '\n';
+        }
+      }
+      if (content === null) {
+        const err: any = new Error(`Task ${id} not found in ${path.relative(root, plan)}`);
+        err.status = 404;
+        throw err;
+      }
+      return {
+        task_id: id,
+        file_path: plan,
+        relative_path: path.relative(root, plan),
+        is_folder_bundle: false,
+        is_plan_task: true,
+        content,
+        progress_content: null,
+      };
+    }
+
     const candidates = [
       ...panel.globFile(tasksDir, `*/${taskId}-*.md`),
       ...panel.globFile(tasksDir, `*/${taskId}/README.md`),
