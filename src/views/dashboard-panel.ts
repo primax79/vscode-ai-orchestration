@@ -486,7 +486,15 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
         const head = new RegExp(`^###\\s+${esc}\\s+[\u2014\u2013-]\\s+`);
         const start = lines.findIndex((l) => head.test(l));
         if (start < 0) {
-          content = null;
+          // Check for matching table row (e.g. | **T1** | ... |)
+          const shortId = id.includes('.') ? id.split('.').pop()! : id;
+          const tableRe = new RegExp(`^\\|\\s*\\*\\*(${esc}|${shortId})\\*\\*\\s*\\|\\s*(.+?)\\|`);
+          const matchingRow = lines.find((l) => tableRe.test(l));
+          if (matchingRow) {
+            content = `### Task ${id}\n\n${matchingRow.trim()}\n\n---\n\n${planText}`;
+          } else {
+            content = null;
+          }
         } else {
           let end = lines.length;
           for (let j = start + 1; j < lines.length; j++) {
