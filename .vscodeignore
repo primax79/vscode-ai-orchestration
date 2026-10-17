@@ -5,3 +5,9 @@ tsconfig.json
 esbuild.config.mjs
 .vscodeignore
 *.vsix
+.kilo/**
+.tmp/**
+scripts/**
+out/**/*.map
+.claude/**
+.playwright-mcp/**
