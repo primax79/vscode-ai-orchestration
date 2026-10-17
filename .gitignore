@@ -1,1 +1,5 @@
 *.vsix
+.tmp/
+node_modules/
+out/
+.DS_Store
