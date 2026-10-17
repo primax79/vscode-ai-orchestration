@@ -22,6 +22,7 @@ import {
 } from './question-notifier';
 
 export {
+  DashboardPanel,
   CliClient,
   DecisionsTreeProvider,
   DecisionGroupTreeItem,

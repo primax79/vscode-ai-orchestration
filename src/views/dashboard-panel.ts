@@ -529,23 +529,27 @@ export class DashboardPanel {
     this._watcherDisposables.push(tasksWatcher, questionsWatcher, runsWatcher);
   }
 
-  private _notifyTasksChanged() {
+  // `refreshExtension` is false when the extension itself asked for the notification
+  // (refreshAll -> notify*Changed): calling onTasksUpdated (= refreshAll) back from there
+  // made an endless, doubling refresh loop (a process storm before 0.2.3, a webview that
+  // reloads every few hundred ms after it).
+  private _notifyTasksChanged(refreshExtension = true) {
     if (this._tasksDebounceTimer) clearTimeout(this._tasksDebounceTimer);
     this._tasksDebounceTimer = setTimeout(() => {
       this._tasksDebounceTimer = null;
       this._panel.webview.postMessage({ type: 'changed', areas: ['tasks'] });
-      if (this.onTasksUpdated) {
+      if (refreshExtension && this.onTasksUpdated) {
         this.onTasksUpdated();
       }
     }, 50);
   }
 
-  private _notifyQuestionsChanged() {
+  private _notifyQuestionsChanged(refreshExtension = true) {
     if (this._questionsDebounceTimer) clearTimeout(this._questionsDebounceTimer);
     this._questionsDebounceTimer = setTimeout(() => {
       this._questionsDebounceTimer = null;
       this._panel.webview.postMessage({ type: 'changed', areas: ['questions', 'tasks'] });
-      if (this.onTasksUpdated) {
+      if (refreshExtension && this.onTasksUpdated) {
         this.onTasksUpdated();
       }
     }, 50);
@@ -559,12 +563,14 @@ export class DashboardPanel {
     }, 50);
   }
 
+  /** Called by the extension's own refresh: updates the webview only. */
   public notifyTasksChanged() {
-    this._notifyTasksChanged();
+    this._notifyTasksChanged(false);
   }
 
+  /** Called by the extension's own refresh: updates the webview only. */
   public notifyQuestionsChanged() {
-    this._notifyQuestionsChanged();
+    this._notifyQuestionsChanged(false);
   }
 
   public postMessage(message: any): Thenable<boolean> {
