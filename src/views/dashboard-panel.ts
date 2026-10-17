@@ -8,15 +8,65 @@ export type CliArgBuilder = (payload: any, root: string) => string[];
 export type CustomHandler = (panel: DashboardPanel, payload: any, root: string) => Promise<any>;
 export type MessageHandler = (panel: DashboardPanel, payload: any, root: string) => Promise<any>;
 
-// Run handlers (07.9): same CLI arguments as the web backend (ai-orchestration-ui/backend/server.py).
-const RUN_ID_RE = /^\d{8}-\d{6}-[A-Za-z0-9.]+-(kilo|claude|codex)-[0-9a-f]{4}$/;
-const runId = (payload: any): string => {
-  const id = String(payload?.runId || payload?.run_id || '');
+// Run handlers (07.9, 09.11): same CLI arguments as the web backend (ai-orchestration-ui/backend/server.py).
+export const RUN_ID_RE = /^\d{8}-\d{6}-[A-Za-z0-9.]+-(kilo|claude|codex)-[0-9a-f]{4}$/;
+export const requireRunId = (payload: any): string => {
+  const id = String(payload?.runId || payload?.run_id || payload?.id || '');
   if (!RUN_ID_RE.test(id)) {
-    throw new Error(`Invalid run ID ${JSON.stringify(id)}`);
+    const err: any = new Error(`Invalid run ID ${JSON.stringify(id)}`);
+    err.status = 400;
+    throw err;
   }
   return id;
 };
+export const runId = requireRunId;
+
+export const TASK_ATTACHMENT_ID_RE = /^T\d{3,}$/;
+export const requireTaskAttachmentId = (payload: any): string => {
+  const id = String(payload?.id || payload?.taskId || payload?.task_id || '');
+  if (!TASK_ATTACHMENT_ID_RE.test(id)) {
+    const isPlan = (id.includes('.') && !id.includes('/')) || (id.length > 0 && /^\d/.test(id)) || id.toLowerCase().includes('plan') || id.startsWith('INIT-');
+    const msg = isPlan
+      ? 'plan tasks take no attachments'
+      : `Invalid task ID ${JSON.stringify(id)}, must match ^T\\d{3,}$`;
+    const err: any = new Error(msg);
+    err.status = 400;
+    throw err;
+  }
+  return id;
+};
+
+export const NOTE_ID_RE = /^N\d{3,}$/;
+export const requireNoteId = (payload: any): string => {
+  const id = String(payload?.id || payload?.noteId || payload?.note_id || '');
+  if (!NOTE_ID_RE.test(id)) {
+    const err: any = new Error(`Invalid note ID ${JSON.stringify(id)}, must match ^N\\d{3,}$`);
+    err.status = 400;
+    throw err;
+  }
+  return id;
+};
+
+export const runTargetArgs = (payload: any): string[] => {
+  const note = payload?.note;
+  const task = payload?.task;
+  if (!note && !task) {
+    const err: any = new Error('task or note is required');
+    err.status = 400;
+    throw err;
+  }
+  if (note) {
+    const noteStr = String(note);
+    if (!NOTE_ID_RE.test(noteStr)) {
+      const err: any = new Error(`Invalid note ID ${JSON.stringify(noteStr)}, must match ^N\\d{3,}$`);
+      err.status = 400;
+      throw err;
+    }
+    return ['--note', noteStr];
+  }
+  return ['--task', String(task)];
+};
+
 const runRequestArgs = (payload: any): string[] => {
   const args: string[] = [];
   for (const [key, flag] of [
@@ -35,17 +85,6 @@ const requireTask = (payload: any): string => {
   const task = String(payload?.task || '');
   if (!task) throw new Error('task is required');
   return task;
-};
-
-export const NOTE_ID_RE = /^N\d{3,}$/;
-export const requireNoteId = (payload: any): string => {
-  const id = String(payload?.id || payload?.noteId || payload?.note_id || '');
-  if (!NOTE_ID_RE.test(id)) {
-    const err: any = new Error(`Invalid note ID ${JSON.stringify(id)}, must match ^N\\d{3,}$`);
-    err.status = 400;
-    throw err;
-  }
-  return id;
 };
 
 export const requireAttachmentName = (payload: any): string => {
@@ -77,12 +116,43 @@ export function sniffImageContentType(buf: Buffer): string {
   return 'application/octet-stream';
 }
 
+export function classifyAttachmentContentType(buf: Buffer): string | null {
+  const imgType = sniffImageContentType(buf);
+  if (imgType !== 'application/octet-stream') {
+    return imgType;
+  }
+  if (buf.length >= 5 && buf.subarray(0, 5).toString('ascii') === '%PDF-') {
+    return 'application/pdf';
+  }
+  const checkLen = Math.min(buf.length, 65536);
+  let hasNul = false;
+  for (let i = 0; i < checkLen; i++) {
+    if (buf[i] === 0) {
+      hasNul = true;
+      break;
+    }
+  }
+  if (!hasNul) {
+    try {
+      new TextDecoder('utf-8', { fatal: true }).decode(buf);
+      return 'text/plain; charset=utf-8';
+    } catch {
+      // not valid utf-8
+    }
+  }
+  return null;
+}
+
 export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
-  getRunOptions: (payload, root) => ['run', 'options', '--task', requireTask(payload), '--workspace', root],
-  previewRun: (payload, root) => ['run', 'preview', '--task', requireTask(payload), '--workspace', root, ...runRequestArgs(payload)],
+  getRunOptions: (payload, root) => ['run', 'options', ...runTargetArgs(payload), '--workspace', root],
+  previewRun: (payload, root) => ['run', 'preview', ...runTargetArgs(payload), '--workspace', root, ...runRequestArgs(payload)],
   startRun: (payload, root) => {
-    if (!payload?.expect_plan_hash) throw new Error('expect_plan_hash is required');
-    return ['run', 'start', '--task', requireTask(payload), '--expect-plan-hash', String(payload.expect_plan_hash),
+    if (!payload?.expect_plan_hash) {
+      const err: any = new Error('expect_plan_hash is required');
+      err.status = 400;
+      throw err;
+    }
+    return ['run', 'start', ...runTargetArgs(payload), '--expect-plan-hash', String(payload.expect_plan_hash),
       '--requested-by', 'vscode', '--workspace', root, ...runRequestArgs(payload)];
   },
   continueRun: (payload, root) => {
@@ -464,6 +534,31 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     if (payload?.timeout) args.push('--timeout', String(payload.timeout));
     return args;
   },
+  deleteTaskAttachment: (payload, root) => {
+    const id = requireTaskAttachmentId(payload);
+    const name = requireAttachmentName(payload);
+    const args = ['tasks', 'detach', id, '--name', name, '--tasks-dir', path.join(root, 'tasks')];
+    const expectHash = payload?.expect_task_hash || payload?.expectTaskHash || payload?.expect_hash;
+    if (expectHash) args.push('--expect-task-hash', String(expectHash));
+    return args;
+  },
+  acceptTriage: (payload, root) => {
+    const id = requireRunId(payload);
+    const args = ['run', 'accept-triage', id, '--workspace', root];
+    const only = payload?.only;
+    if (only !== undefined && only !== null) {
+      if (Array.isArray(only)) {
+        args.push('--only', only.map(String).join(','));
+      } else {
+        args.push('--only', String(only).trim());
+      }
+    }
+    const expectNoteHash = payload?.expect_note_hash || payload?.expectNoteHash;
+    if (expectNoteHash) {
+      args.push('--expect-note-hash', String(expectNoteHash).trim());
+    }
+    return args;
+  },
 };
 
 export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
@@ -761,6 +856,202 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
       contentType,
     };
   },
+  uploadTaskAttachment: async (panel, payload, root) => {
+    const id = requireTaskAttachmentId(payload);
+    const rawData = String(payload?.data || '');
+    if (!rawData) {
+      const err: any = new Error('data is required');
+      err.status = 400;
+      throw err;
+    }
+    const base64Str = rawData.includes(',') ? rawData.split(',')[1] : rawData;
+    const buf = Buffer.from(base64Str, 'base64');
+    if (buf.length > 10 * 1024 * 1024) {
+      const err: any = new Error('Attachment exceeds 10 MB limit');
+      err.status = 413;
+      throw err;
+    }
+
+    const rawFilename = String(payload?.filename || payload?.name || 'attachment.png');
+    const parsed = path.parse(rawFilename);
+    const stem = parsed.name || 'attachment';
+    const ext = parsed.ext || '.tmp';
+    const sanitizedStem = stem.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^[-._]+|[-._]+$/g, '') || 'attachment';
+
+    const rand = Math.random().toString(36).substring(2, 10);
+    const tempFile = path.join(os.tmpdir(), `ai-orch-task-attach-${Date.now()}-${rand}${ext}`);
+
+    try {
+      fs.writeFileSync(tempFile, buf);
+      const cmd = [
+        'tasks', 'attach', id,
+        '--file', tempFile,
+        '--name', sanitizedStem,
+        '--tasks-dir', path.join(root, 'tasks'),
+      ];
+      const expectHash = payload?.expect_task_hash || payload?.expectTaskHash || payload?.expect_hash;
+      if (expectHash) {
+        cmd.push('--expect-task-hash', String(expectHash));
+      }
+      const res = await panel.cliClient.runJsonCommand<any>(cmd, root);
+      panel.postMessage({ type: 'changed', areas: ['tasks'] });
+      if (panel.onTasksUpdated) panel.onTasksUpdated();
+      return res;
+    } finally {
+      if (tempFile && fs.existsSync(tempFile)) {
+        try {
+          fs.unlinkSync(tempFile);
+        } catch {}
+      }
+    }
+  },
+  getTaskAttachment: async (panel, payload, root) => {
+    const id = requireTaskAttachmentId(payload);
+    const name = requireAttachmentName(payload);
+
+    const tasksDir = path.join(root, 'tasks');
+    let listData: any;
+    try {
+      listData = await panel.cliClient.runJsonCommand<any>(['tasks', 'list', '--tasks-dir', tasksDir], root);
+    } catch (e: any) {
+      const err: any = new Error(`Task ${id} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    if (!listData || typeof listData !== 'object') {
+      const err: any = new Error(`Task ${id} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    let taskEntry: any = null;
+    if (Array.isArray(listData.emergent_tasks)) {
+      taskEntry = listData.emergent_tasks.find((t: any) => t && t.id === id);
+    }
+    if (!taskEntry && Array.isArray(listData.all_tasks)) {
+      taskEntry = listData.all_tasks.find((t: any) => t && t.id === id);
+    }
+    if (!taskEntry && listData.tree && typeof listData.tree === 'object') {
+      taskEntry = listData.tree[id];
+    }
+
+    if (!taskEntry) {
+      const err: any = new Error(`Task ${id} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    let folderPathStr = taskEntry.task_root || taskEntry.folder_path;
+    if (!folderPathStr && taskEntry.file_path) {
+      folderPathStr = path.dirname(taskEntry.file_path);
+    }
+
+    const isFolder = taskEntry.is_folder ?? (Boolean(taskEntry.task_root || taskEntry.folder_path) || (taskEntry.file_path && path.basename(taskEntry.file_path) === 'README.md'));
+    if (!isFolder || !folderPathStr) {
+      const err: any = new Error(`Task ${id} has no attachments`);
+      err.status = 404;
+      throw err;
+    }
+
+    const folderPath = path.isAbsolute(folderPathStr) ? path.resolve(folderPathStr) : path.resolve(root, folderPathStr);
+    const attachmentsDir = path.join(folderPath, 'attachments');
+    if (!fs.existsSync(attachmentsDir)) {
+      const err: any = new Error(`Attachment ${name} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    const targetFile = path.join(attachmentsDir, name);
+    if (!fs.existsSync(targetFile)) {
+      const err: any = new Error(`Attachment ${name} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    const realAttachmentsDir = fs.realpathSync(attachmentsDir);
+    const realTargetFile = fs.realpathSync(targetFile);
+
+    const rel = path.relative(realAttachmentsDir, realTargetFile);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      const err: any = new Error('Path traversal detected');
+      err.status = 400;
+      throw err;
+    }
+
+    const stat = fs.statSync(realTargetFile);
+    if (!stat.isFile()) {
+      const err: any = new Error(`Attachment ${name} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    const buf = fs.readFileSync(realTargetFile);
+    const contentType = classifyAttachmentContentType(buf);
+    if (!contentType) {
+      const err: any = new Error('Unsupported attachment format');
+      err.status = 415;
+      throw err;
+    }
+    return {
+      data: buf.toString('base64'),
+      content_type: contentType,
+      contentType,
+    };
+  },
+  getTriageProposal: async (panel, payload, root) => {
+    const id = requireRunId(payload);
+    let data: any;
+    try {
+      data = await panel.cliClient.runJsonCommand<any>(['run', 'show', id, '--workspace', root], root);
+    } catch (e: any) {
+      const errStr = String(e?.message || '').toLowerCase();
+      if (errStr.includes('not found') || errStr.includes('not-found')) {
+        const err: any = new Error(`Run ${id} not found`);
+        err.status = 404;
+        throw err;
+      }
+      throw e;
+    }
+    const runRecord = data && typeof data === 'object' && data.run && typeof data.run === 'object'
+      ? data.run
+      : (data && typeof data === 'object' ? data : {});
+
+    if (runRecord.mode && runRecord.mode !== 'triage') {
+      const err: any = new Error(`Run '${id}' is not a triage run (mode=${runRecord.mode})`);
+      err.status = 400;
+      throw err;
+    }
+
+    let proposalStatus = runRecord.proposal_status ?? null;
+    let proposalError = runRecord.proposal_error ?? null;
+    let proposal = runRecord.triage_proposal ?? runRecord.proposal ?? null;
+
+    if (proposal === null) {
+      const proposalFile = path.join(root, '.ai-orchestration', 'runs', id, 'triage-proposal.json');
+      if (fs.existsSync(proposalFile)) {
+        try {
+          proposal = JSON.parse(fs.readFileSync(proposalFile, 'utf-8'));
+        } catch (e: any) {
+          if (!proposalError) {
+            proposalError = `Failed to parse stored proposal JSON: ${e.message}`;
+          }
+        }
+      }
+    }
+
+    if (proposalStatus === null && proposal !== null) {
+      proposalStatus = 'pending';
+    }
+
+    return {
+      ok: true,
+      run_id: id,
+      proposal_status: proposalStatus,
+      proposal_error: proposalError,
+      proposal,
+    };
+  },
 };
 
 export const HANDLER_MAP: Record<string, MessageHandler> = {
@@ -775,6 +1066,11 @@ const INBOX_WRITE_TYPES = new Set([
   'discardInboxNote',
   'reopenInboxNote',
   'inboxToTask',
+  'acceptTriage',
+]);
+
+const TASK_WRITE_TYPES = new Set([
+  'deleteTaskAttachment',
 ]);
 
 for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
@@ -784,6 +1080,9 @@ for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
 
     if (INBOX_WRITE_TYPES.has(type)) {
       panel.postMessage({ type: 'changed', areas: ['inbox', 'tasks'] });
+      if (panel.onTasksUpdated) panel.onTasksUpdated();
+    } else if (TASK_WRITE_TYPES.has(type)) {
+      panel.postMessage({ type: 'changed', areas: ['tasks'] });
       if (panel.onTasksUpdated) panel.onTasksUpdated();
     } else if (type === 'transitionTask') {
       try {

@@ -20,6 +20,13 @@ import {
   requireNoteId,
   requireAttachmentName,
   sniffImageContentType,
+  RUN_ID_RE,
+  requireRunId,
+  runId,
+  TASK_ATTACHMENT_ID_RE,
+  requireTaskAttachmentId,
+  runTargetArgs,
+  classifyAttachmentContentType,
 } from './views/dashboard-panel';
 import { WorkspaceManager } from './workspace-manager';
 import {
@@ -38,6 +45,13 @@ export {
   requireNoteId,
   requireAttachmentName,
   sniffImageContentType,
+  RUN_ID_RE,
+  requireRunId,
+  runId,
+  TASK_ATTACHMENT_ID_RE,
+  requireTaskAttachmentId,
+  runTargetArgs,
+  classifyAttachmentContentType,
   DashboardPanel,
   CliClient,
   DecisionsTreeProvider,
