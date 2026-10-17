@@ -2,7 +2,7 @@
   "name": "vscode-ai-orchestration",
   "displayName": "AI Orchestration & Task Manager",
   "description": "Task backlog management, worktree execution control, and multi-agent independent verification for Kilo, Claude, and Codex.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "AlfredoOliviero",
   "license": "MIT",
   "icon": "resources/icon.png",
