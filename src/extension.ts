@@ -22,6 +22,7 @@ import {
 } from './question-notifier';
 
 export {
+  CliClient,
   DecisionsTreeProvider,
   DecisionGroupTreeItem,
   DecisionQuestionTreeItem,
@@ -70,7 +71,19 @@ export function activate(context: vscode.ExtensionContext) {
     decisionsTreeView
   );
 
+  // Every trigger (watchers, commands, dashboard writes) goes through one debounced refresh,
+  // so a burst of file events costs one round of CLI calls.
+  let refreshTimer: NodeJS.Timeout | null = null;
   const refreshAll = () => {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      refreshAllNow();
+    }, 300);
+  };
+  context.subscriptions.push(new vscode.Disposable(() => refreshTimer && clearTimeout(refreshTimer)));
+
+  const refreshAllNow = () => {
     nextUpProvider.refresh();
     initiativesProvider.refresh();
     decisionsProvider.refresh();

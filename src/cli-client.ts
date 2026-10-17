@@ -150,8 +150,27 @@ export function mapCliStatus(code: number, data: any, defaultErrorStatus = 500):
   return defaultErrorStatus;
 }
 
+// Guards against process storms: at most MAX_CONCURRENT CLI processes, identical
+// read-only calls already in flight are shared, and every process has a deadline.
+const MAX_CONCURRENT = 4;
+const PROCESS_TIMEOUT_MS = 120_000;
+const READ_ONLY_COMMANDS = new Set([
+  'tasks list', 'tasks validate', 'questions list', 'questions show',
+  'config show', 'env status', 'run list', 'run show', 'run logs', 'run options',
+]);
+
+export function isReadOnlyCommand(args: string[]): boolean {
+  if (args.includes('--check') || args.includes('--dry-run') || args.includes('--diff')) {
+    return true;
+  }
+  return READ_ONLY_COMMANDS.has(`${args[0] ?? ''} ${args[1] ?? ''}`);
+}
+
 export class CliClient {
   private outputChannel: vscode.OutputChannel | OutputChannelLike;
+  private running = 0;
+  private waiters: Array<() => void> = [];
+  private inFlightReads = new Map<string, Promise<any>>();
 
   constructor(outputChannel: vscode.OutputChannel | OutputChannelLike) {
     this.outputChannel = outputChannel;
@@ -240,13 +259,48 @@ export class CliClient {
       fullArgs.push('--json');
     }
 
+    const cwd = workspaceRoot || process.cwd();
+    if (!isReadOnlyCommand(args)) {
+      return this.withSlot(() => this.spawnJson<T>(pythonExe, fullArgs, cwd));
+    }
+    const key = `${cwd}\u0000${fullArgs.join('\u0000')}`;
+    const existing = this.inFlightReads.get(key);
+    if (existing) {
+      return existing as Promise<T>;
+    }
+    const p = this.withSlot(() => this.spawnJson<T>(pythonExe, fullArgs, cwd)).finally(() => {
+      this.inFlightReads.delete(key);
+    });
+    this.inFlightReads.set(key, p);
+    return p;
+  }
+
+  private async withSlot<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.running >= MAX_CONCURRENT) {
+      await new Promise<void>((r) => this.waiters.push(r));
+    }
+    this.running++;
+    try {
+      return await fn();
+    } finally {
+      this.running--;
+      const next = this.waiters.shift();
+      if (next) next();
+    }
+  }
+
+  private spawnJson<T>(pythonExe: string, fullArgs: string[], cwd: string): Promise<T> {
     this.outputChannel.appendLine(`[exec] ${pythonExe} ${fullArgs.join(' ')}`);
 
     return new Promise((resolve, reject) => {
       const proc = spawn(pythonExe, fullArgs, {
-        cwd: workspaceRoot || process.cwd(),
+        cwd,
         env: process.env,
       });
+      const timer = setTimeout(() => {
+        this.outputChannel.appendLine(`[timeout] killing after ${PROCESS_TIMEOUT_MS} ms: ${fullArgs.join(' ')}`);
+        proc.kill('SIGKILL');
+      }, PROCESS_TIMEOUT_MS);
 
       let stdout = '';
       let stderr = '';
@@ -255,6 +309,7 @@ export class CliClient {
       proc.stderr.on('data', (d) => (stderr += d.toString()));
 
       proc.on('close', (code) => {
+        clearTimeout(timer);
         const exitCode = code ?? 0;
         let parsed: any = null;
         let isJson = false;
@@ -292,6 +347,7 @@ export class CliClient {
       });
 
       proc.on('error', (err) => {
+        clearTimeout(timer);
         reject(new CliError(err.message, -1, 500, undefined, String(err)));
       });
     });
