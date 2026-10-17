@@ -170,7 +170,7 @@ export function mapCliStatus(code: number, data: any, defaultErrorStatus = 500):
 const MAX_CONCURRENT = 4;
 const PROCESS_TIMEOUT_MS = 120_000;
 const READ_ONLY_COMMANDS = new Set([
-  'tasks list', 'tasks validate', 'questions list', 'questions show',
+  'tasks list', 'tasks validate', 'tasks graph', 'questions list', 'questions show',
   'config show', 'env status', 'run list', 'run show', 'run logs', 'run options',
   'inbox list', 'inbox show',
 ]);

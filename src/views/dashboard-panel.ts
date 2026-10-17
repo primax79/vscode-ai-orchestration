@@ -143,7 +143,57 @@ export function classifyAttachmentContentType(buf: Buffer): string | null {
   return null;
 }
 
+// Timeline (10.2): same CLI arguments as the web backend's /api/tasks/{id}/priority|size|deps.
+const TASK_MUTATION_ID_RE = /^(T\d{3,}|\d{2,}\.\d+)$/;
+const mutationTaskId = (payload: any): string => {
+  const id = String(payload?.taskId || payload?.task_id || '');
+  if (!TASK_MUTATION_ID_RE.test(id)) throw new Error(`Invalid task id ${JSON.stringify(id)}`);
+  return id;
+};
+const depIds = (v: any): string[] =>
+  (Array.isArray(v) ? v : v ? [v] : [])
+    .flatMap((x: any) => String(x).split(/[\s,]+/))
+    .map((x: string) => x.trim())
+    .filter(Boolean);
+const mutationTail = (payload: any, preview: boolean): string[] => {
+  const h = payload?.expect_task_hash || payload?.expect_hash;
+  if (!preview && !h) throw new Error('expect_task_hash is required');
+  const tail: string[] = [];
+  if (preview) tail.push('--dry-run');
+  if (h) tail.push('--expect-task-hash', String(h));
+  return tail;
+};
+const priorityArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const p = String(payload?.priority || '').toUpperCase();
+  if (!['P0', 'P1', 'P2', 'P3'].includes(p)) throw new Error(`Invalid priority ${JSON.stringify(p)}`);
+  const args = ['tasks', 'set-priority', mutationTaskId(payload), p, '--tasks-dir', path.join(root, 'tasks')];
+  if (payload?.reason) args.push('--reason', String(payload.reason));
+  return [...args, ...mutationTail(payload, preview)];
+};
+const sizeArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const sz = String(payload?.size || '').toUpperCase();
+  if (!['XS', 'S', 'M', 'L', 'XL'].includes(sz)) throw new Error(`Invalid size ${JSON.stringify(sz)}`);
+  return ['tasks', 'set-size', mutationTaskId(payload), sz, '--tasks-dir', path.join(root, 'tasks'), ...mutationTail(payload, preview)];
+};
+const depsArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const args = ['tasks', 'set-deps', mutationTaskId(payload), '--tasks-dir', path.join(root, 'tasks')];
+  const add = depIds(payload?.add);
+  const remove = depIds(payload?.remove);
+  const to = payload?.to !== undefined ? depIds(payload.to) : payload?.deps !== undefined ? depIds(payload.deps) : null;
+  if (add.length) args.push('--add', ...add);
+  if (remove.length) args.push('--remove', ...remove);
+  if (to) args.push('--to', ...to);
+  return [...args, ...mutationTail(payload, preview)];
+};
+
 export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
+  getGraph: (payload, root) => ['tasks', 'graph', '--tasks-dir', path.join(root, 'tasks')],
+  previewSetPriority: priorityArgs(true),
+  setPriority: priorityArgs(false),
+  previewSetSize: sizeArgs(true),
+  setSize: sizeArgs(false),
+  previewSetDeps: depsArgs(true),
+  setDeps: depsArgs(false),
   getRunOptions: (payload, root) => ['run', 'options', ...runTargetArgs(payload), '--workspace', root],
   previewRun: (payload, root) => ['run', 'preview', ...runTargetArgs(payload), '--workspace', root, ...runRequestArgs(payload)],
   startRun: (payload, root) => {
@@ -1096,6 +1146,9 @@ for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
       } catch {}
       if (panel.onTasksUpdated) panel.onTasksUpdated();
     } else if (
+      type === 'setPriority' ||
+      type === 'setSize' ||
+      type === 'setDeps' ||
       type === 'startRun' ||
       type === 'continueRun' ||
       type === 'cancelRun' ||
