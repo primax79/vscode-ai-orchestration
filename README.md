@@ -32,7 +32,7 @@ Powered by [`ai-orchestration`](../ai-orchestration/).
 Install the packaged `.vsix` into VS Code:
 
 ```bash
-code --install-extension /Users/Alfredo/works/ai-coding-tools/vscode-ai-orchestration/vscode-ai-orchestration-0.1.0.vsix
+code --install-extension ./vscode-ai-orchestration-0.1.0.vsix
 ```
 
 Or from the VS Code Extensions view (`Cmd+Shift+X` / `Ctrl+Shift+X`):

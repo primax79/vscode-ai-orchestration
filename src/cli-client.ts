@@ -40,6 +40,71 @@ export interface TaskListResult {
   all_tasks?: TaskItem[];
 }
 
+export class CliError extends Error {
+  public code: number;
+  public status: number;
+  public data?: any;
+  public stderr: string;
+
+  constructor(message: string, code: number, status: number, data?: any, stderr = '') {
+    super(message);
+    this.name = 'CliError';
+    this.code = code;
+    this.status = status;
+    this.data = data;
+    this.stderr = stderr;
+  }
+}
+
+export function mapCliStatus(code: number, data: any, defaultErrorStatus = 500): number {
+  if (code === 0) return 200;
+  if (code === 504) return 504;
+
+  let errStr = '';
+  if (data && typeof data === 'object') {
+    if (data.error === 'stale-task' || data.error === 'lock-timeout') {
+      return 409;
+    }
+    const errVal = data.error || data.message || '';
+    errStr = String(errVal).toLowerCase();
+  } else if (typeof data === 'string') {
+    errStr = data.toLowerCase();
+  }
+
+  if (
+    errStr.includes('hash mismatch') ||
+    errStr.includes('plan hash mismatch') ||
+    errStr.includes('stale') ||
+    errStr.includes('lock-timeout') ||
+    errStr.includes('task-write lock') ||
+    errStr.includes('timed out waiting for task-write lock') ||
+    errStr.includes('refusing to apply') ||
+    errStr.includes('workspace has no project config') ||
+    errStr.includes('no project config')
+  ) {
+    return 409;
+  }
+
+  if (
+    errStr.includes('required') ||
+    errStr.includes('invalid') ||
+    errStr.includes('unknown') ||
+    errStr.includes('unrecognized') ||
+    errStr.includes('not found') ||
+    errStr.includes('validation') ||
+    errStr.includes('illegal transition') ||
+    errStr.includes('cannot transition') ||
+    errStr.includes('waiting invariant') ||
+    errStr.includes('must end with') ||
+    errStr.includes('exceeds 160') ||
+    errStr.includes('single line')
+  ) {
+    return 400;
+  }
+
+  return defaultErrorStatus;
+}
+
 export class CliClient {
   private outputChannel: vscode.OutputChannel;
 
@@ -57,19 +122,32 @@ export class CliClient {
 
     const home = process.env.HOME || process.env.USERPROFILE || '';
 
-    // Candidate locations
+    // Candidate locations in specified order:
+    // <workspace>/bin/ai-orch -> <workspace>/../ai-orchestration/bin/ai-orch -> ~/.ai-orchestration/repos/ai-orchestration/bin/ai-orch
     const candidates: string[] = [];
     if (workspaceRoot) {
       candidates.push(
         path.join(workspaceRoot, 'bin', 'ai-orch'),
-        path.join(workspaceRoot, 'ai-orchestration', 'bin', 'ai-orch'),
         path.join(workspaceRoot, '..', 'ai-orchestration', 'bin', 'ai-orch')
       );
+
+      // Search upward in parent folders for sibling ai-orchestration/bin/ai-orch (e.g. within worktrees)
+      let cur = workspaceRoot;
+      while (true) {
+        const parent = path.dirname(cur);
+        if (parent === cur) break;
+        const cand = path.join(parent, 'ai-orchestration', 'bin', 'ai-orch');
+        if (!candidates.includes(cand)) {
+          candidates.push(cand);
+        }
+        cur = parent;
+      }
     }
-    candidates.push(
-      path.join(home, '.ai-orchestration', 'repos', 'ai-orchestration', 'bin', 'ai-orch'),
-      '/Users/Alfredo/works/ai-coding-tools/ai-orchestration/bin/ai-orch'
-    );
+    if (home) {
+      candidates.push(
+        path.join(home, '.ai-orchestration', 'repos', 'ai-orchestration', 'bin', 'ai-orch')
+      );
+    }
 
     for (const c of candidates) {
       if (fs.existsSync(c)) {
@@ -82,13 +160,18 @@ export class CliClient {
   public async runJsonCommand<T>(args: string[], workspaceRoot?: string): Promise<T> {
     const cliPath = this.resolveCliPath(workspaceRoot);
     if (!cliPath) {
-      throw new Error(
-        'ai-orch CLI not found. Please install ai-orchestration or configure aiOrchestration.cliPath in settings.'
+      throw new CliError(
+        'ai-orch CLI not found. Please install ai-orchestration or configure aiOrchestration.cliPath in settings.',
+        1,
+        500
       );
     }
 
     const pythonExe = process.platform === 'win32' ? 'python' : 'python3';
-    const fullArgs = [cliPath, ...args, '--json'];
+    const fullArgs = [cliPath, ...args];
+    if (!fullArgs.includes('--json')) {
+      fullArgs.push('--json');
+    }
 
     this.outputChannel.appendLine(`[exec] ${pythonExe} ${fullArgs.join(' ')}`);
 
@@ -105,21 +188,44 @@ export class CliClient {
       proc.stderr.on('data', (d) => (stderr += d.toString()));
 
       proc.on('close', (code) => {
-        if (code !== 0 && !stdout.trim()) {
-          this.outputChannel.appendLine(`[error] code=${code} stderr=${stderr}`);
-          return reject(new Error(stderr || `Process exited with code ${code}`));
+        const exitCode = code ?? 0;
+        let parsed: any = null;
+        let isJson = false;
+
+        const trimmedOut = stdout.trim();
+        if (trimmedOut) {
+          try {
+            parsed = JSON.parse(trimmedOut);
+            isJson = true;
+          } catch (e: any) {
+            // Not JSON
+          }
         }
-        try {
-          const parsed = JSON.parse(stdout.trim());
-          resolve(parsed as T);
-        } catch (e: any) {
+
+        if (exitCode !== 0) {
+          this.outputChannel.appendLine(`[error] code=${exitCode} stderr=${stderr} stdout=${stdout}`);
+          const status = mapCliStatus(exitCode, parsed || stderr || stdout);
+          let errMsg = `Process exited with code ${exitCode}`;
+          if (parsed && typeof parsed === 'object') {
+            errMsg = parsed.error || parsed.message || JSON.stringify(parsed);
+          } else if (stderr.trim()) {
+            errMsg = stderr.trim();
+          } else if (trimmedOut) {
+            errMsg = trimmedOut;
+          }
+          return reject(new CliError(errMsg, exitCode, status, parsed, stderr));
+        }
+
+        if (!isJson) {
           this.outputChannel.appendLine(`[json parse error] output was: ${stdout}`);
-          reject(new Error(`Failed to parse CLI JSON output: ${e.message}`));
+          return reject(new CliError(`Failed to parse CLI JSON output: ${stdout}`, 0, 500, undefined, stderr));
         }
+
+        resolve(parsed as T);
       });
 
       proc.on('error', (err) => {
-        reject(err);
+        reject(new CliError(err.message, -1, 500, undefined, String(err)));
       });
     });
   }
@@ -129,9 +235,13 @@ export class CliClient {
     return this.runJsonCommand<TaskListResult>(['tasks', 'list', '--tasks-dir', tasksDir], workspaceRoot);
   }
 
-  public async syncIndex(workspaceRoot: string): Promise<any> {
+  public async syncIndex(workspaceRoot: string, expectHash?: string): Promise<any> {
     const tasksDir = path.join(workspaceRoot, 'tasks');
-    return this.runJsonCommand(['tasks', 'sync-index', '--tasks-dir', tasksDir, '--apply'], workspaceRoot);
+    const args = ['tasks', 'sync-index', '--tasks-dir', tasksDir, '--apply'];
+    if (expectHash) {
+      args.push('--expect-hash', expectHash);
+    }
+    return this.runJsonCommand(args, workspaceRoot);
   }
 
   public async validateTasks(workspaceRoot: string): Promise<any> {
@@ -145,12 +255,16 @@ export class CliClient {
     newState: string,
     actor = 'operator',
     verifier?: string,
-    reason?: string
+    reason?: string,
+    expectTaskHash?: string,
+    forceUnblock?: boolean
   ): Promise<any> {
     const tasksDir = path.join(workspaceRoot, 'tasks');
     const args = ['tasks', 'transition', taskId, newState, '--tasks-dir', tasksDir, '--actor', actor];
     if (verifier) args.push('--verifier', verifier);
     if (reason) args.push('--reason', reason);
+    if (expectTaskHash) args.push('--expect-task-hash', expectTaskHash);
+    if (forceUnblock) args.push('--force-unblock');
     return this.runJsonCommand(args, workspaceRoot);
   }
 
@@ -162,7 +276,10 @@ export class CliClient {
     return this.runJsonCommand(['env', 'status', '--workspace', workspaceRoot], workspaceRoot);
   }
 
-  public async applyAgentsMd(workspaceRoot: string): Promise<any> {
-    return this.runJsonCommand(['render-agents-md', '--workspace', workspaceRoot, '--apply'], workspaceRoot);
+  public async applyAgentsMd(workspaceRoot: string, expectHash?: string, allowGlobalRouting = false): Promise<any> {
+    const args = ['render-agents-md', '--workspace', workspaceRoot, '--apply'];
+    if (expectHash) args.push('--expect-hash', expectHash);
+    if (allowGlobalRouting) args.push('--allow-global-routing');
+    return this.runJsonCommand(args, workspaceRoot);
   }
 }

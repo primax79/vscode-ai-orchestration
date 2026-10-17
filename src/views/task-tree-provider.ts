@@ -122,7 +122,8 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
 
   constructor(
     private cliClient: CliClient,
-    private viewType: 'nextUp' | 'initiatives' | 'decisions'
+    private viewType: 'nextUp' | 'initiatives' | 'decisions',
+    private getRootPath?: () => string
   ) {}
 
   public refresh(): void {
@@ -135,12 +136,15 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
   }
 
   async getChildren(element?: vscode.TreeItem): Promise<vscode.TreeItem[]> {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders || workspaceFolders.length === 0) {
+    const rootPath = this.getRootPath
+      ? this.getRootPath()
+      : (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+          ? vscode.workspace.workspaceFolders[0].uri.fsPath
+          : null);
+
+    if (!rootPath) {
       return [new vscode.TreeItem('No workspace open')];
     }
-
-    const rootPath = workspaceFolders[0].uri.fsPath;
     const tasksDir = path.join(rootPath, 'tasks');
     if (!fs.existsSync(tasksDir)) {
       const item = new vscode.TreeItem('No tasks/ directory found');

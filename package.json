@@ -143,7 +143,9 @@
     "build": "node esbuild.config.mjs",
     "watch": "node esbuild.config.mjs --watch",
     "compile": "tsc -p . --noEmit && node esbuild.config.mjs",
-    "vscode:prepublish": "npm run compile"
+    "vscode:prepublish": "npm run compile",
+    "sync-webview": "node scripts/sync-webview.mjs",
+    "test": "node scripts/test-bridge-parity.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",
