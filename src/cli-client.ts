@@ -191,6 +191,11 @@ export class CliClient {
         cur = parent;
       }
     }
+    // Shared per-user install (install.sh, `ai-orch env fetch-repos`): preferred outside a dev checkout
+    if (home) {
+      candidates.push(path.join(home, '.ai-orchestration', 'repos', 'ai-orchestration', 'bin', 'ai-orch'));
+    }
+
     // PATH (VS Code started from the Dock does not inherit the login shell PATH,
     // so the usual user bin directories are checked explicitly as well).
     const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
@@ -207,8 +212,7 @@ export class CliClient {
     if (home) {
       candidates.push(
         // Claude Code keeps a full clone of the ai-orchestration marketplace repo here
-        path.join(home, '.claude', 'plugins', 'marketplaces', 'ai-orchestration', 'bin', 'ai-orch'),
-        path.join(home, '.ai-orchestration', 'repos', 'ai-orchestration', 'bin', 'ai-orch')
+        path.join(home, '.claude', 'plugins', 'marketplaces', 'ai-orchestration', 'bin', 'ai-orch')
       );
     }
 
