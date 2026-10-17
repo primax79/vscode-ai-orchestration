@@ -567,6 +567,10 @@ export class DashboardPanel {
     this._notifyQuestionsChanged();
   }
 
+  public postMessage(message: any): Thenable<boolean> {
+    return this._panel.webview.postMessage(message);
+  }
+
   private async _handleMessage(message: any) {
     const { id, type, payload } = message || {};
     if (!id || !type) return;

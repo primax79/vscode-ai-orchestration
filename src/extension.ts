@@ -3,8 +3,25 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { CliClient } from './cli-client';
 import { TaskTreeProvider, TaskTreeItem } from './views/task-tree-provider';
+import {
+  DecisionsTreeProvider,
+  DecisionGroupTreeItem,
+  DecisionQuestionTreeItem,
+  getDecisionsTreeData,
+  getBlockedTaskIds,
+  groupOpenQuestions,
+} from './views/decisions-tree-provider';
 import { DashboardPanel } from './views/dashboard-panel';
 import { WorkspaceManager } from './workspace-manager';
+
+export {
+  DecisionsTreeProvider,
+  DecisionGroupTreeItem,
+  DecisionQuestionTreeItem,
+  getDecisionsTreeData,
+  getBlockedTaskIds,
+  groupOpenQuestions,
+};
 
 export function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel('AI Orchestration');
@@ -23,12 +40,17 @@ export function activate(context: vscode.ExtensionContext) {
   const getBoundRoot = () => workspaceManager.getBoundWorkspaceFolder();
   const nextUpProvider = new TaskTreeProvider(cliClient, 'nextUp', getBoundRoot);
   const initiativesProvider = new TaskTreeProvider(cliClient, 'initiatives', getBoundRoot);
-  const decisionsProvider = new TaskTreeProvider(cliClient, 'decisions', getBoundRoot);
+  const decisionsProvider = new DecisionsTreeProvider(cliClient, getBoundRoot);
+
+  const decisionsTreeView = vscode.window.createTreeView('aiOrchestration.decisionsView', {
+    treeDataProvider: decisionsProvider,
+  });
+  decisionsProvider.bindTreeView(decisionsTreeView);
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('aiOrchestration.nextUpView', nextUpProvider),
     vscode.window.registerTreeDataProvider('aiOrchestration.initiativesView', initiativesProvider),
-    vscode.window.registerTreeDataProvider('aiOrchestration.decisionsView', decisionsProvider)
+    decisionsTreeView
   );
 
   const refreshAll = () => {
@@ -37,6 +59,7 @@ export function activate(context: vscode.ExtensionContext) {
     decisionsProvider.refresh();
     if (DashboardPanel.currentPanel) {
       DashboardPanel.currentPanel.notifyTasksChanged();
+      DashboardPanel.currentPanel.notifyQuestionsChanged();
     }
     updateStatusBarCount();
   };
@@ -53,7 +76,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('aiOrchestration.openDashboard', async () => {
+    vscode.commands.registerCommand('aiOrchestration.openDashboard', async (options?: { tab?: string; questionId?: string } | string) => {
       const folders = vscode.workspace.workspaceFolders;
       if (!folders || folders.length === 0) {
         vscode.window.showWarningMessage('No workspace open to show AI Orchestration dashboard');
@@ -85,6 +108,23 @@ export function activate(context: vscode.ExtensionContext) {
       );
       setupWatcherForBoundFolder();
       refreshAll();
+
+      if (options && DashboardPanel.currentPanel) {
+        const questionId = typeof options === 'string' ? options : options.questionId;
+        const tab = typeof options === 'object' && options.tab ? options.tab : 'decisions';
+        DashboardPanel.currentPanel.postMessage({
+          type: 'navigate',
+          tab,
+          questionId,
+        });
+      }
+    }),
+
+    vscode.commands.registerCommand('aiOrchestration.openDecision', async (questionId?: string) => {
+      await vscode.commands.executeCommand('aiOrchestration.openDashboard', {
+        tab: 'decisions',
+        questionId,
+      });
     }),
 
     vscode.commands.registerCommand('aiOrchestration.refresh', () => {
@@ -135,23 +175,30 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // File System Watcher on tasks/ directory for bound folder
-  let activeWatcher: vscode.Disposable | undefined;
+  // File System Watchers on tasks/ and tasks/questions/** for bound folder
+  let activeWatchers: vscode.Disposable[] = [];
   const setupWatcherForBoundFolder = () => {
-    if (activeWatcher) {
-      activeWatcher.dispose();
-      activeWatcher = undefined;
+    while (activeWatchers.length) {
+      const d = activeWatchers.pop();
+      if (d) d.dispose();
     }
     const bound = workspaceManager.getBoundWorkspaceFolder();
     if (bound && fs.existsSync(bound)) {
-      const watcher = vscode.workspace.createFileSystemWatcher(
+      const tasksWatcher = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(bound, 'tasks/**/*.{md,toml}')
       );
-      watcher.onDidChange(() => refreshAll());
-      watcher.onDidCreate(() => refreshAll());
-      watcher.onDidDelete(() => refreshAll());
-      activeWatcher = watcher;
-      context.subscriptions.push(watcher);
+      tasksWatcher.onDidChange(() => refreshAll());
+      tasksWatcher.onDidCreate(() => refreshAll());
+      tasksWatcher.onDidDelete(() => refreshAll());
+
+      const questionsWatcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(bound, 'tasks/questions/**')
+      );
+      questionsWatcher.onDidChange(() => refreshAll());
+      questionsWatcher.onDidCreate(() => refreshAll());
+      questionsWatcher.onDidDelete(() => refreshAll());
+
+      activeWatchers.push(tasksWatcher, questionsWatcher);
     }
   };
   setupWatcherForBoundFolder();
@@ -166,6 +213,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Initial load
   updateStatusBarCount();
+  decisionsProvider.updateBadge();
   outputChannel.appendLine('AI Orchestration extension activated.');
 }
 

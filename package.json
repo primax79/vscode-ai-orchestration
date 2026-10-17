@@ -22,7 +22,9 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:aiOrchestration.openDashboard",
-    "onView:aiOrchestration.nextUpView"
+    "onCommand:aiOrchestration.openDecision",
+    "onView:aiOrchestration.nextUpView",
+    "onView:aiOrchestration.decisionsView"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -60,6 +62,12 @@
         "title": "Open Task Dashboard",
         "category": "AI Orchestration",
         "icon": "$(layers)"
+      },
+      {
+        "command": "aiOrchestration.openDecision",
+        "title": "Open Decision in Dashboard",
+        "category": "AI Orchestration",
+        "icon": "$(question)"
       },
       {
         "command": "aiOrchestration.refresh",
@@ -145,7 +153,7 @@
     "compile": "tsc -p . --noEmit && node esbuild.config.mjs",
     "vscode:prepublish": "npm run compile",
     "sync-webview": "node scripts/sync-webview.mjs",
-    "test": "node scripts/test-bridge-parity.mjs"
+    "test": "node scripts/test-bridge-parity.mjs && node scripts/test-decisions-tree.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",

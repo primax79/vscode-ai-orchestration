@@ -40,6 +40,51 @@ export interface TaskListResult {
   all_tasks?: TaskItem[];
 }
 
+export interface QuestionOption {
+  label: string;
+  title: string;
+  consequence?: string | null;
+  raw?: string;
+}
+
+export interface QuestionAnswer {
+  choice: string;
+  answered_by: string;
+  answered: string;
+  text?: string | null;
+}
+
+export interface QuestionItem {
+  id: string;
+  question: string;
+  status: 'open' | 'answered' | 'withdrawn' | string;
+  blocks: string;
+  blocks_parsed?: [string, string | null][];
+  decider: string;
+  asked_by: string;
+  asked: string;
+  origin_run: string;
+  open_answer: string;
+  recommended: string;
+  title?: string;
+  context?: string;
+  options?: QuestionOption[];
+  answer?: QuestionAnswer;
+  file_path?: string;
+  rel_path?: string;
+  filename?: string;
+  headers?: Record<string, string>;
+}
+
+export interface QuestionListResult {
+  ok: boolean;
+  questions: QuestionItem[];
+}
+
+export interface OutputChannelLike {
+  appendLine(value: string): void;
+}
+
 export class CliError extends Error {
   public code: number;
   public status: number;
@@ -106,19 +151,21 @@ export function mapCliStatus(code: number, data: any, defaultErrorStatus = 500):
 }
 
 export class CliClient {
-  private outputChannel: vscode.OutputChannel;
+  private outputChannel: vscode.OutputChannel | OutputChannelLike;
 
-  constructor(outputChannel: vscode.OutputChannel) {
+  constructor(outputChannel: vscode.OutputChannel | OutputChannelLike) {
     this.outputChannel = outputChannel;
   }
 
   public resolveCliPath(workspaceRoot?: string): string | null {
     // 1. Configured custom path
-    const config = vscode.workspace.getConfiguration('aiOrchestration');
-    const customPath = config.get<string>('cliPath');
-    if (customPath && fs.existsSync(customPath)) {
-      return customPath;
-    }
+    try {
+      const config = vscode.workspace?.getConfiguration ? vscode.workspace.getConfiguration('aiOrchestration') : undefined;
+      const customPath = config?.get<string>('cliPath');
+      if (customPath && fs.existsSync(customPath)) {
+        return customPath;
+      }
+    } catch {}
 
     const home = process.env.HOME || process.env.USERPROFILE || '';
 
@@ -233,6 +280,18 @@ export class CliClient {
   public async listTasks(workspaceRoot: string): Promise<TaskListResult> {
     const tasksDir = path.join(workspaceRoot, 'tasks');
     return this.runJsonCommand<TaskListResult>(['tasks', 'list', '--tasks-dir', tasksDir], workspaceRoot);
+  }
+
+  public async listQuestions(workspaceRoot: string, status?: string, blocks?: string): Promise<QuestionListResult> {
+    const tasksDir = path.join(workspaceRoot, 'tasks');
+    const args = ['questions', 'list', '--tasks-dir', tasksDir];
+    if (status) {
+      args.push('--status', status);
+    }
+    if (blocks) {
+      args.push('--blocks', blocks);
+    }
+    return this.runJsonCommand<QuestionListResult>(args, workspaceRoot);
   }
 
   public async syncIndex(workspaceRoot: string, expectHash?: string): Promise<any> {

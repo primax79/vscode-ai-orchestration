@@ -2,6 +2,12 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CliClient, TaskItem, InitiativeItem, TaskListResult } from '../cli-client';
+import {
+  DecisionsTreeProvider,
+  DecisionGroupTreeItem,
+  DecisionQuestionTreeItem,
+  DecisionTreeItem as NewDecisionTreeItem,
+} from './decisions-tree-provider';
 
 export class TaskTreeItem extends vscode.TreeItem {
   constructor(
@@ -119,6 +125,7 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
     this._onDidChangeTreeData.event;
 
   private cachedResult: TaskListResult | null = null;
+  private decisionsDelegate?: DecisionsTreeProvider;
 
   constructor(
     private cliClient: CliClient,
@@ -128,6 +135,9 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
 
   public refresh(): void {
     this.cachedResult = null;
+    if (this.decisionsDelegate) {
+      this.decisionsDelegate.refresh();
+    }
     this._onDidChangeTreeData.fire();
   }
 
@@ -208,13 +218,10 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
       }
 
       if (this.viewType === 'decisions') {
-        const decisions = allTasks.filter(
-          (t) => (t.decider && t.decider !== '-') || t.state === 'waiting'
-        );
-        if (decisions.length === 0) {
-          return [new vscode.TreeItem('No decisions waiting on user')];
+        if (!this.decisionsDelegate) {
+          this.decisionsDelegate = new DecisionsTreeProvider(this.cliClient, this.getRootPath);
         }
-        return decisions.map((t) => new DecisionTreeItem(t, rootPath));
+        return this.decisionsDelegate.getChildren(element);
       }
 
       return [];
@@ -225,3 +232,9 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
     }
   }
 }
+
+export {
+  DecisionsTreeProvider,
+  DecisionGroupTreeItem,
+  DecisionQuestionTreeItem,
+};
