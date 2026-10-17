@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { CliClient, CliError } from '../cli-client';
 
 export type CliArgBuilder = (payload: any, root: string) => string[];
@@ -150,22 +151,70 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     if (payload?.allowGlobalRouting || payload?.allow_global_routing) args.push('--allow-global-routing');
     return args;
   },
+  getQuestions: (payload, root) => {
+    const args = ['questions', 'list', '--tasks-dir', path.join(root, 'tasks')];
+    if (payload?.status) args.push('--status', String(payload.status));
+    if (payload?.blocks) args.push('--blocks', String(payload.blocks));
+    return args;
+  },
   listQuestions: (payload, root) => {
     const args = ['questions', 'list', '--tasks-dir', path.join(root, 'tasks')];
     if (payload?.status) args.push('--status', String(payload.status));
     if (payload?.blocks) args.push('--blocks', String(payload.blocks));
     return args;
   },
-  getQuestion: (payload, root) => ['questions', 'show', String(payload?.questionId || payload?.question_id), '--tasks-dir', path.join(root, 'tasks')],
+  getQuestion: (payload, root) => {
+    const qid = payload?.id || payload?.questionId || payload?.question_id;
+    if (!qid) {
+      const err: any = new Error('question_id is required');
+      err.status = 400;
+      throw err;
+    }
+    return ['questions', 'show', String(qid), '--tasks-dir', path.join(root, 'tasks')];
+  },
   answerQuestion: (payload, root) => {
-    const qid = payload?.questionId || payload?.question_id;
+    const qid = payload?.id || payload?.questionId || payload?.question_id;
+    if (!qid) {
+      const err: any = new Error('question_id is required');
+      err.status = 400;
+      throw err;
+    }
     const choice = payload?.choice;
+    if (!choice) {
+      const err: any = new Error('choice is required');
+      err.status = 400;
+      throw err;
+    }
     const args = ['questions', 'answer', String(qid), '--choice', String(choice), '--tasks-dir', path.join(root, 'tasks')];
-    if (payload?.text) args.push('--text', String(payload.text));
+    if (payload?.text !== undefined && payload?.text !== null) {
+      const textStr = String(payload.text);
+      if (Buffer.byteLength(textStr, 'utf-8') > 32 * 1024) {
+        const err: any = new Error('Answer text exceeds 32 KB limit');
+        err.status = 400;
+        throw err;
+      }
+      args.push('--text', textStr);
+    }
     if (payload?.by) args.push('--by', String(payload.by));
     return args;
   },
-  withdrawQuestion: (payload, root) => ['questions', 'withdraw', String(payload?.questionId || payload?.question_id), '--tasks-dir', path.join(root, 'tasks')],
+  withdrawQuestion: (payload, root) => {
+    const qid = payload?.id || payload?.questionId || payload?.question_id;
+    if (!qid) {
+      const err: any = new Error('question_id is required');
+      err.status = 400;
+      throw err;
+    }
+    const reason = payload?.reason ? String(payload.reason).trim() : '';
+    if (!reason) {
+      const err: any = new Error('reason is required');
+      err.status = 400;
+      throw err;
+    }
+    const args = ['questions', 'withdraw', String(qid), '--reason', reason, '--tasks-dir', path.join(root, 'tasks')];
+    if (payload?.by) args.push('--by', String(payload.by));
+    return args;
+  },
 };
 
 export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
@@ -224,6 +273,78 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
       progress_content: progressContent,
     };
   },
+  askQuestion: async (panel, payload, root) => {
+    const tasksDir = path.join(root, 'tasks');
+    const cmd = ['questions', 'ask', '--tasks-dir', tasksDir];
+
+    const fromTask = payload?.fromTask || payload?.from_task;
+    if (fromTask) cmd.push('--from-task', String(fromTask));
+
+    if (payload?.question) cmd.push('--question', String(payload.question));
+
+    if (payload?.recommended) cmd.push('--recommended', String(payload.recommended));
+
+    const openAnswer = payload?.openAnswer !== undefined ? payload.openAnswer : payload?.open_answer;
+    if (openAnswer !== undefined && openAnswer !== null) {
+      const oaStr = openAnswer === true ? 'yes' : openAnswer === false ? 'no' : String(openAnswer);
+      cmd.push('--open-answer', oaStr);
+    }
+
+    if (payload?.blocks) {
+      const blocks = payload.blocks;
+      if (Array.isArray(blocks)) {
+        cmd.push('--blocks', blocks.map(String).join(', '));
+      } else {
+        cmd.push('--blocks', String(blocks));
+      }
+    }
+
+    if (payload?.decider) cmd.push('--decider', String(payload.decider));
+    const askedBy = payload?.askedBy || payload?.asked_by;
+    if (askedBy) cmd.push('--asked-by', String(askedBy));
+    const originRun = payload?.originRun || payload?.origin_run;
+    if (originRun) cmd.push('--origin-run', String(originRun));
+
+    if (Array.isArray(payload?.options)) {
+      for (const opt of payload.options) {
+        if (typeof opt === 'object' && opt !== null) {
+          const label = String(opt.label || '').trim();
+          const title = String(opt.title || '').trim();
+          const consequence = opt.consequence ? String(opt.consequence).trim() : null;
+          let optArg = label;
+          if (consequence) {
+            optArg = `${label}=${title}: ${consequence}`;
+          } else if (title) {
+            optArg = `${label}=${title}`;
+          }
+          cmd.push('--option', optArg);
+        } else if (typeof opt === 'string') {
+          cmd.push('--option', opt);
+        }
+      }
+    }
+
+    let tempCtxFile: string | null = null;
+    try {
+      if (payload?.context !== undefined && payload?.context !== null) {
+        const tmpDir = os.tmpdir();
+        const rand = Math.random().toString(36).substring(2, 10);
+        tempCtxFile = path.join(tmpDir, `ai-orch-context-${Date.now()}-${rand}.md`);
+        fs.writeFileSync(tempCtxFile, String(payload.context), 'utf-8');
+        cmd.push('--context-file', tempCtxFile);
+      }
+
+      const res = await panel.cliClient.runJsonCommand<any>(cmd, root);
+      if (panel.onTasksUpdated) panel.onTasksUpdated();
+      return res;
+    } finally {
+      if (tempCtxFile && fs.existsSync(tempCtxFile)) {
+        try {
+          fs.unlinkSync(tempCtxFile);
+        } catch {}
+      }
+    }
+  },
 };
 
 export const HANDLER_MAP: Record<string, MessageHandler> = {
@@ -246,7 +367,12 @@ for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
         }
       } catch {}
       if (panel.onTasksUpdated) panel.onTasksUpdated();
-    } else if (type === 'syncIndex' || type === 'applyAgentsMd') {
+    } else if (
+      type === 'syncIndex' ||
+      type === 'applyAgentsMd' ||
+      type === 'answerQuestion' ||
+      type === 'withdrawQuestion'
+    ) {
       if (panel.onTasksUpdated) panel.onTasksUpdated();
     }
 
@@ -268,6 +394,7 @@ export class DashboardPanel {
   private _watcherDisposables: vscode.Disposable[] = [];
   private _tasksDebounceTimer: any = null;
   private _runsDebounceTimer: any = null;
+  private _questionsDebounceTimer: any = null;
 
   public static createOrShow(
     extensionUri: vscode.Uri,
@@ -358,7 +485,7 @@ export class DashboardPanel {
     if (this.onFolderBound) {
       await this.onFolderBound(newRoot);
     }
-    this._panel.webview.postMessage({ type: 'changed', areas: ['tasks', 'config', 'env'] });
+    this._panel.webview.postMessage({ type: 'changed', areas: ['tasks', 'config', 'env', 'questions'] });
     if (this.onTasksUpdated) {
       this.onTasksUpdated();
     }
@@ -377,9 +504,20 @@ export class DashboardPanel {
     // Watch bound folder's tasks/**
     const tasksPattern = new vscode.RelativePattern(this._boundRoot, 'tasks/**');
     const tasksWatcher = vscode.workspace.createFileSystemWatcher(tasksPattern);
-    tasksWatcher.onDidChange(() => this._notifyTasksChanged());
-    tasksWatcher.onDidCreate(() => this._notifyTasksChanged());
-    tasksWatcher.onDidDelete(() => this._notifyTasksChanged());
+    const isQuestionPath = (uri: vscode.Uri) => {
+      const rel = path.relative(this._boundRoot, uri.fsPath).replace(/\\/g, '/');
+      return rel.startsWith('tasks/questions/') || rel === 'tasks/questions';
+    };
+    tasksWatcher.onDidChange((uri) => { if (!isQuestionPath(uri)) this._notifyTasksChanged(); });
+    tasksWatcher.onDidCreate((uri) => { if (!isQuestionPath(uri)) this._notifyTasksChanged(); });
+    tasksWatcher.onDidDelete((uri) => { if (!isQuestionPath(uri)) this._notifyTasksChanged(); });
+
+    // Watch bound folder's tasks/questions/**
+    const questionsPattern = new vscode.RelativePattern(this._boundRoot, 'tasks/questions/**');
+    const questionsWatcher = vscode.workspace.createFileSystemWatcher(questionsPattern);
+    questionsWatcher.onDidChange(() => this._notifyQuestionsChanged());
+    questionsWatcher.onDidCreate(() => this._notifyQuestionsChanged());
+    questionsWatcher.onDidDelete(() => this._notifyQuestionsChanged());
 
     // Watch bound folder's .ai-orchestration/runs/*/run.json
     const runsPattern = new vscode.RelativePattern(this._boundRoot, '.ai-orchestration/runs/*/run.json');
@@ -388,7 +526,7 @@ export class DashboardPanel {
     runsWatcher.onDidCreate(() => this._notifyRunsChanged());
     runsWatcher.onDidDelete(() => this._notifyRunsChanged());
 
-    this._watcherDisposables.push(tasksWatcher, runsWatcher);
+    this._watcherDisposables.push(tasksWatcher, questionsWatcher, runsWatcher);
   }
 
   private _notifyTasksChanged() {
@@ -396,6 +534,17 @@ export class DashboardPanel {
     this._tasksDebounceTimer = setTimeout(() => {
       this._tasksDebounceTimer = null;
       this._panel.webview.postMessage({ type: 'changed', areas: ['tasks'] });
+      if (this.onTasksUpdated) {
+        this.onTasksUpdated();
+      }
+    }, 50);
+  }
+
+  private _notifyQuestionsChanged() {
+    if (this._questionsDebounceTimer) clearTimeout(this._questionsDebounceTimer);
+    this._questionsDebounceTimer = setTimeout(() => {
+      this._questionsDebounceTimer = null;
+      this._panel.webview.postMessage({ type: 'changed', areas: ['questions', 'tasks'] });
       if (this.onTasksUpdated) {
         this.onTasksUpdated();
       }
@@ -412,6 +561,10 @@ export class DashboardPanel {
 
   public notifyTasksChanged() {
     this._notifyTasksChanged();
+  }
+
+  public notifyQuestionsChanged() {
+    this._notifyQuestionsChanged();
   }
 
   private async _handleMessage(message: any) {
@@ -478,6 +631,7 @@ export class DashboardPanel {
     }
     if (this._tasksDebounceTimer) clearTimeout(this._tasksDebounceTimer);
     if (this._runsDebounceTimer) clearTimeout(this._runsDebounceTimer);
+    if (this._questionsDebounceTimer) clearTimeout(this._questionsDebounceTimer);
     this._panel.dispose();
     while (this._disposables.length) {
       const x = this._disposables.pop();
