@@ -37,6 +37,46 @@ const requireTask = (payload: any): string => {
   return task;
 };
 
+export const NOTE_ID_RE = /^N\d{3,}$/;
+export const requireNoteId = (payload: any): string => {
+  const id = String(payload?.id || payload?.noteId || payload?.note_id || '');
+  if (!NOTE_ID_RE.test(id)) {
+    const err: any = new Error(`Invalid note ID ${JSON.stringify(id)}, must match ^N\\d{3,}$`);
+    err.status = 400;
+    throw err;
+  }
+  return id;
+};
+
+export const requireAttachmentName = (payload: any): string => {
+  const name = String(payload?.name || payload?.filename || payload?.attachment || '');
+  if (!name || name.includes('/') || name.includes('\\') || name.includes('..') || name.includes('\0')) {
+    const err: any = new Error(`Invalid attachment name ${JSON.stringify(name)}`);
+    err.status = 400;
+    throw err;
+  }
+  return name;
+};
+
+export function sniffImageContentType(buf: Buffer): string {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 && buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a) {
+    return 'image/png';
+  }
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (buf.length >= 6) {
+    const sig = buf.toString('ascii', 0, 6);
+    if (sig === 'GIF87a' || sig === 'GIF89a') {
+      return 'image/gif';
+    }
+  }
+  if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return 'application/octet-stream';
+}
+
 export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
   getRunOptions: (payload, root) => ['run', 'options', '--task', requireTask(payload), '--workspace', root],
   previewRun: (payload, root) => ['run', 'preview', '--task', requireTask(payload), '--workspace', root, ...runRequestArgs(payload)],
@@ -292,6 +332,100 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     if (payload?.by) args.push('--by', String(payload.by));
     return args;
   },
+  listInbox: (payload, root) => {
+    const args = ['inbox', 'list', '--tasks-dir', path.join(root, 'tasks')];
+    if (payload?.status) args.push('--status', String(payload.status));
+    return args;
+  },
+  getInboxNote: (payload, root) => ['inbox', 'show', requireNoteId(payload), '--tasks-dir', path.join(root, 'tasks')],
+  addInboxNote: (payload, root) => {
+    const title = payload?.title ? String(payload.title).trim() : '';
+    if (!title) {
+      const err: any = new Error('title is required');
+      err.status = 400;
+      throw err;
+    }
+    const args = ['inbox', 'add', '--title', title, '--tasks-dir', path.join(root, 'tasks')];
+    if (payload?.kind) args.push('--kind', String(payload.kind));
+    if (payload?.about) args.push('--about', String(payload.about));
+    if (payload?.author) args.push('--author', String(payload.author));
+    if (payload?.status) args.push('--status', String(payload.status));
+    if (payload?.body !== undefined && payload?.body !== null) args.push('--body', String(payload.body));
+    return args;
+  },
+  editInboxNote: (payload, root) => {
+    const id = requireNoteId(payload);
+    const args = ['inbox', 'edit', id, '--tasks-dir', path.join(root, 'tasks')];
+    if (payload?.title !== undefined && payload?.title !== null) args.push('--title', String(payload.title));
+    if (payload?.kind !== undefined && payload?.kind !== null) args.push('--kind', String(payload.kind));
+    if (payload?.about !== undefined && payload?.about !== null) args.push('--about', String(payload.about));
+    if (payload?.author !== undefined && payload?.author !== null) args.push('--author', String(payload.author));
+    if (payload?.status !== undefined && payload?.status !== null) args.push('--status', String(payload.status));
+    const expectHash = payload?.expect_hash || payload?.expectHash;
+    if (expectHash) args.push('--expect-hash', String(expectHash));
+    if (payload?.body !== undefined && payload?.body !== null) args.push('--body', String(payload.body));
+    return args;
+  },
+  deleteInboxAttachment: (payload, root) => {
+    const id = requireNoteId(payload);
+    const name = requireAttachmentName(payload);
+    return ['inbox', 'detach', id, '--name', name, '--tasks-dir', path.join(root, 'tasks')];
+  },
+  resolveInboxNote: (payload, root) => {
+    const id = requireNoteId(payload);
+    const produced = payload?.produced ? String(payload.produced).trim() : '';
+    if (!produced) {
+      const err: any = new Error('produced is required');
+      err.status = 400;
+      throw err;
+    }
+    const args = ['inbox', 'resolve', id, '--produced', produced, '--tasks-dir', path.join(root, 'tasks')];
+    if (payload?.by) args.push('--by', String(payload.by));
+    return args;
+  },
+  discardInboxNote: (payload, root) => {
+    const id = requireNoteId(payload);
+    const reason = payload?.reason ? String(payload.reason).trim() : '';
+    if (!reason) {
+      const err: any = new Error('reason is required');
+      err.status = 400;
+      throw err;
+    }
+    return ['inbox', 'discard', id, '--reason', reason, '--tasks-dir', path.join(root, 'tasks')];
+  },
+  reopenInboxNote: (payload, root) => ['inbox', 'reopen', requireNoteId(payload), '--tasks-dir', path.join(root, 'tasks')],
+  inboxToTask: (payload, root) => {
+    const id = requireNoteId(payload);
+    const category = payload?.category || payload?.parent ? String(payload.category || payload.parent).trim() : '';
+    if (!category) {
+      const err: any = new Error('category is required');
+      err.status = 400;
+      throw err;
+    }
+    const title = payload?.title ? String(payload.title).trim() : '';
+    if (!title) {
+      const err: any = new Error('title is required');
+      err.status = 400;
+      throw err;
+    }
+    const args = [
+      'tasks', 'new',
+      '--from-note', id,
+      '--category', category,
+      '--title', title,
+      '--tasks-dir', path.join(root, 'tasks'),
+    ];
+    if (payload?.priority) args.push('--priority', String(payload.priority));
+    const priorityReason = payload?.priority_reason || payload?.priorityReason;
+    if (priorityReason) args.push('--priority-reason', String(priorityReason));
+    if (payload?.executor) args.push('--executor', String(payload.executor));
+    const nextUp = payload?.next_up || payload?.nextUp;
+    if (nextUp) args.push('--next-up', String(nextUp));
+    const dependsOn = payload?.depends_on || payload?.dependsOn;
+    if (dependsOn) args.push('--depends-on', String(dependsOn));
+    if (payload?.decider) args.push('--decider', String(payload.decider));
+    return args;
+  },
 };
 
 export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
@@ -476,18 +610,136 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
       }
     }
   },
+  uploadInboxAttachment: async (panel, payload, root) => {
+    const id = requireNoteId(payload);
+    const rawData = String(payload?.data || '');
+    if (!rawData) {
+      const err: any = new Error('data is required');
+      err.status = 400;
+      throw err;
+    }
+    const base64Str = rawData.includes(',') ? rawData.split(',')[1] : rawData;
+    const buf = Buffer.from(base64Str, 'base64');
+    if (buf.length > 10 * 1024 * 1024) {
+      const err: any = new Error('Attachment exceeds 10 MB limit');
+      err.status = 413;
+      throw err;
+    }
+
+    const rawFilename = String(payload?.filename || payload?.name || 'attachment.png');
+    const parsed = path.parse(rawFilename);
+    const stem = parsed.name || 'attachment';
+    const ext = parsed.ext || '.tmp';
+    const sanitizedStem = stem.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^[-._]+|[-._]+$/g, '') || 'attachment';
+
+    const rand = Math.random().toString(36).substring(2, 10);
+    const tempFile = path.join(os.tmpdir(), `ai-orch-attach-${Date.now()}-${rand}${ext}`);
+
+    try {
+      fs.writeFileSync(tempFile, buf);
+      const cmd = [
+        'inbox', 'attach', id,
+        '--file', tempFile,
+        '--name', sanitizedStem,
+        '--tasks-dir', path.join(root, 'tasks'),
+      ];
+      const res = await panel.cliClient.runJsonCommand<any>(cmd, root);
+      panel.postMessage({ type: 'changed', areas: ['inbox', 'tasks'] });
+      if (panel.onTasksUpdated) panel.onTasksUpdated();
+      return res;
+    } finally {
+      if (tempFile && fs.existsSync(tempFile)) {
+        try {
+          fs.unlinkSync(tempFile);
+        } catch {}
+      }
+    }
+  },
+  getInboxAttachment: async (panel, payload, root) => {
+    const id = requireNoteId(payload);
+    const name = requireAttachmentName(payload);
+
+    const showCmd = ['inbox', 'show', id, '--tasks-dir', path.join(root, 'tasks')];
+    let noteData: any;
+    try {
+      noteData = await panel.cliClient.runJsonCommand<any>(showCmd, root);
+    } catch (e: any) {
+      const err: any = new Error(`Note ${id} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    if (!noteData || !noteData.ok || !noteData.note || !noteData.note.folder_path) {
+      const err: any = new Error(`Note ${id} folder not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    const folderPath = path.resolve(String(noteData.note.folder_path));
+    const attachmentsDir = path.join(folderPath, 'attachments');
+    if (!fs.existsSync(attachmentsDir)) {
+      const err: any = new Error(`Attachment ${name} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    const targetFile = path.join(attachmentsDir, name);
+    if (!fs.existsSync(targetFile)) {
+      const err: any = new Error(`Attachment ${name} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    const realAttachmentsDir = fs.realpathSync(attachmentsDir);
+    const realTargetFile = fs.realpathSync(targetFile);
+
+    const rel = path.relative(realAttachmentsDir, realTargetFile);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      const err: any = new Error('Path traversal detected');
+      err.status = 400;
+      throw err;
+    }
+
+    const stat = fs.statSync(realTargetFile);
+    if (!stat.isFile()) {
+      const err: any = new Error(`Attachment ${name} not found`);
+      err.status = 404;
+      throw err;
+    }
+
+    const buf = fs.readFileSync(realTargetFile);
+    const contentType = sniffImageContentType(buf);
+    return {
+      data: buf.toString('base64'),
+      content_type: contentType,
+      contentType,
+    };
+  },
 };
 
 export const HANDLER_MAP: Record<string, MessageHandler> = {
   ...CUSTOM_HANDLERS,
 };
 
+const INBOX_WRITE_TYPES = new Set([
+  'addInboxNote',
+  'editInboxNote',
+  'deleteInboxAttachment',
+  'resolveInboxNote',
+  'discardInboxNote',
+  'reopenInboxNote',
+  'inboxToTask',
+]);
+
 for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
   HANDLER_MAP[type] = async (panel: DashboardPanel, payload: any, root: string) => {
     const args = builder(payload, root);
     const data = await panel.cliClient.runJsonCommand<any>(args, root);
 
-    if (type === 'transitionTask') {
+    if (INBOX_WRITE_TYPES.has(type)) {
+      panel.postMessage({ type: 'changed', areas: ['inbox', 'tasks'] });
+      if (panel.onTasksUpdated) panel.onTasksUpdated();
+    } else if (type === 'transitionTask') {
       try {
         const checkData = await panel.cliClient.runJsonCommand<any>(
           ['tasks', 'sync-index', '--tasks-dir', path.join(root, 'tasks'), '--check'],
@@ -621,7 +873,7 @@ export class DashboardPanel {
     if (this.onFolderBound) {
       await this.onFolderBound(newRoot);
     }
-    this._panel.webview.postMessage({ type: 'changed', areas: ['tasks', 'config', 'env', 'questions'] });
+    this._panel.webview.postMessage({ type: 'changed', areas: ['tasks', 'config', 'env', 'questions', 'inbox'] });
     if (this.onTasksUpdated) {
       this.onTasksUpdated();
     }

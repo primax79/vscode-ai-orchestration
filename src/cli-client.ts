@@ -107,8 +107,14 @@ export function mapCliStatus(code: number, data: any, defaultErrorStatus = 500):
 
   let errStr = '';
   if (data && typeof data === 'object') {
-    if (data.error === 'stale-task' || data.error === 'lock-timeout') {
+    if (data.error === 'stale-task' || data.error === 'lock-timeout' || data.error === 'stale-note') {
       return 409;
+    }
+    if (data.error === 'invalid-image-type' || data.reason === 'invalid-image-type') {
+      return 415;
+    }
+    if (data.error === 'size-limit-exceeded' || data.reason === 'size-limit-exceeded') {
+      return 413;
     }
     const errVal = data.error || data.message || '';
     errStr = String(errVal).toLowerCase();
@@ -120,6 +126,7 @@ export function mapCliStatus(code: number, data: any, defaultErrorStatus = 500):
     errStr.includes('hash mismatch') ||
     errStr.includes('plan hash mismatch') ||
     errStr.includes('stale') ||
+    errStr.includes('stale-note') ||
     errStr.includes('lock-timeout') ||
     errStr.includes('task-write lock') ||
     errStr.includes('timed out waiting for task-write lock') ||
@@ -128,6 +135,14 @@ export function mapCliStatus(code: number, data: any, defaultErrorStatus = 500):
     errStr.includes('no project config')
   ) {
     return 409;
+  }
+
+  if (errStr.includes('invalid-image-type') || errStr.includes('magic bytes do not match')) {
+    return 415;
+  }
+
+  if (errStr.includes('size-limit-exceeded')) {
+    return 413;
   }
 
   if (
@@ -157,6 +172,7 @@ const PROCESS_TIMEOUT_MS = 120_000;
 const READ_ONLY_COMMANDS = new Set([
   'tasks list', 'tasks validate', 'questions list', 'questions show',
   'config show', 'env status', 'run list', 'run show', 'run logs', 'run options',
+  'inbox list', 'inbox show',
 ]);
 
 export function isReadOnlyCommand(args: string[]): boolean {

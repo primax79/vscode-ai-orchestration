@@ -11,7 +11,16 @@ import {
   getBlockedTaskIds,
   groupOpenQuestions,
 } from './views/decisions-tree-provider';
-import { DashboardPanel, HANDLER_MAP } from './views/dashboard-panel';
+import {
+  DashboardPanel,
+  HANDLER_MAP,
+  CLI_COMMAND_MAP,
+  CUSTOM_HANDLERS,
+  NOTE_ID_RE,
+  requireNoteId,
+  requireAttachmentName,
+  sniffImageContentType,
+} from './views/dashboard-panel';
 import { WorkspaceManager } from './workspace-manager';
 import {
   QuestionNotifier,
@@ -23,6 +32,12 @@ import {
 
 export {
   HANDLER_MAP,
+  CLI_COMMAND_MAP,
+  CUSTOM_HANDLERS,
+  NOTE_ID_RE,
+  requireNoteId,
+  requireAttachmentName,
+  sniffImageContentType,
   DashboardPanel,
   CliClient,
   DecisionsTreeProvider,
