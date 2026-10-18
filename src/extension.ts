@@ -43,6 +43,13 @@ import {
   getActiveTriggerConfigPath,
   generateUnifiedDiff,
   computeTriggerToggle,
+  PROPOSAL_ACTION_ID_RE,
+  TURN_ID_RE,
+  validateTurnId,
+  getRotateAfterTokens,
+  readPartialAssistantMessages,
+  getTurnSortKey,
+  compareTurns,
 } from './views/dashboard-panel';
 import { WorkspaceManager } from './workspace-manager';
 import {
@@ -93,6 +100,13 @@ export {
   getActiveTriggerConfigPath,
   generateUnifiedDiff,
   computeTriggerToggle,
+  PROPOSAL_ACTION_ID_RE,
+  TURN_ID_RE,
+  validateTurnId,
+  getRotateAfterTokens,
+  readPartialAssistantMessages,
+  getTurnSortKey,
+  compareTurns,
   DashboardPanel,
   CliClient,
   isReadOnlyCommand,

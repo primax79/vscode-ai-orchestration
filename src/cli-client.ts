@@ -174,10 +174,11 @@ const READ_ONLY_COMMANDS = new Set([
   'config show', 'env status', 'run list', 'run show', 'run logs', 'run options',
   'inbox list', 'inbox show', 'events tail', 'events stats',
   'sessions list', 'sessions show', 'triggers list', 'triggers status', 'triggers history',
+  'orchestrator status',
 ]);
 
 export function isReadOnlyCommand(args: string[]): boolean {
-  if (args.includes('--check') || args.includes('--dry-run') || args.includes('--diff')) {
+  if (args.includes('--check') || args.includes('--dry-run') || args.includes('--diff') || args.includes('--plan')) {
     return true;
   }
   return READ_ONLY_COMMANDS.has(`${args[0] ?? ''} ${args[1] ?? ''}`);
