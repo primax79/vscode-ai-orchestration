@@ -175,7 +175,7 @@
     "compile": "tsc -p . --noEmit && node esbuild.config.mjs",
     "vscode:prepublish": "npm run compile",
     "sync-webview": "node scripts/sync-webview.mjs",
-    "test": "node scripts/test-bridge-parity.mjs && node scripts/test-decisions-tree.mjs && node scripts/test-question-notifier.mjs && node scripts/test-cli-guard.mjs && node scripts/test-refresh-loop.mjs && node scripts/test-task-detail.mjs && node scripts/test-inbox-bridge.mjs && node scripts/test-task-attachments-triage.mjs && node scripts/test-parity-handlers.mjs && node scripts/test-event-watcher.mjs"
+    "test": "node scripts/test-bridge-parity.mjs && node scripts/test-decisions-tree.mjs && node scripts/test-question-notifier.mjs && node scripts/test-cli-guard.mjs && node scripts/test-refresh-loop.mjs && node scripts/test-task-detail.mjs && node scripts/test-inbox-bridge.mjs && node scripts/test-task-attachments-triage.mjs && node scripts/test-parity-handlers.mjs && node scripts/test-event-watcher.mjs && node scripts/test-126-handlers.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",

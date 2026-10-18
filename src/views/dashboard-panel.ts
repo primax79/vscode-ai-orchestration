@@ -836,6 +836,17 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     return args;
   },
   getEventsStats: (payload, root) => ['events', 'stats', '--workspace', root],
+  getTriggers: (payload, root) => ['triggers', 'list', '--workspace', root],
+  getTriggersStatus: (payload, root) => {
+    const role = String(payload?.role || 'orchestrator');
+    return ['triggers', 'status', '--role', role, '--workspace', root];
+  },
+  getTriggersHistory: (payload, root) => {
+    const args = ['triggers', 'history', '--workspace', root];
+    if (payload?.rule) args.push('--rule', String(payload.rule));
+    if (payload?.limit !== undefined && payload?.limit !== null) args.push('--limit', String(payload.limit));
+    return args;
+  },
 };
 
 export function checkOriginRunContinuable(
@@ -912,6 +923,144 @@ export function formatContinuationInstructions(
     parts.push(String(freeText).trim());
   }
   return parts.join(' ');
+}
+
+export function getActiveTriggerConfigPath(root: string): string {
+  const localCfg = path.join(root, '.ai-orchestration.local.toml');
+  if (fs.existsSync(localCfg)) return localCfg;
+  const wsCfg = path.join(root, 'orchestration.toml');
+  if (fs.existsSync(wsCfg)) return wsCfg;
+  const globalCfg = (process.env.AI_ORCH_GLOBAL_CONFIG || '').trim();
+  if (globalCfg && fs.existsSync(globalCfg)) return path.resolve(globalCfg);
+  const configDir = (process.env.AI_ORCH_CONFIG_DIR || '').trim() ||
+    ((process.env.AI_ORCH_HOME || '').trim()
+      ? path.join((process.env.AI_ORCH_HOME || '').trim(), '.config', 'ai-orchestration')
+      : path.join(os.homedir(), '.config', 'ai-orchestration'));
+  return path.join(configDir, 'orchestration.toml');
+}
+
+export function generateUnifiedDiff(oldText: string, newText: string, filePath: string): string {
+  if (oldText === newText) return '';
+  const oldLines = oldText.length > 0 ? oldText.split(/\r?\n/) : [];
+  if (oldLines.length > 0 && oldLines[oldLines.length - 1] === '') {
+    oldLines.pop();
+  }
+  const newLines = newText.length > 0 ? newText.split(/\r?\n/) : [];
+  if (newLines.length > 0 && newLines[newLines.length - 1] === '') {
+    newLines.pop();
+  }
+
+  let start = 0;
+  while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) {
+    start++;
+  }
+
+  let oldEnd = oldLines.length - 1;
+  let newEnd = newLines.length - 1;
+  while (oldEnd >= start && newEnd >= start && oldLines[oldEnd] === newLines[newEnd]) {
+    oldEnd--;
+    newEnd--;
+  }
+
+  const contextStart = Math.max(0, start - 3);
+  const oldContextEnd = Math.min(oldLines.length - 1, oldEnd + 3);
+  const newContextEnd = Math.min(newLines.length - 1, newEnd + 3);
+
+  const oldHunkCount = Math.max(0, oldContextEnd - contextStart + 1);
+  const newHunkCount = Math.max(0, (newEnd - start + 1) + (start - contextStart) + (newContextEnd - newEnd));
+
+  const diff: string[] = [
+    `--- ${filePath}`,
+    `+++ ${filePath}`,
+    `@@ -${contextStart + 1},${oldHunkCount} +${contextStart + 1},${newHunkCount} @@`,
+  ];
+
+  for (let i = contextStart; i < start; i++) {
+    diff.push(` ${oldLines[i]}`);
+  }
+  for (let i = start; i <= oldEnd; i++) {
+    diff.push(`-${oldLines[i]}`);
+  }
+  for (let i = start; i <= newEnd; i++) {
+    diff.push(`+${newLines[i]}`);
+  }
+  for (let i = oldEnd + 1; i <= oldContextEnd; i++) {
+    diff.push(` ${oldLines[i]}`);
+  }
+
+  return diff.join('\n') + '\n';
+}
+
+export function computeTriggerToggle(
+  targetFilePath: string,
+  ruleName: string | null | undefined,
+  killSwitch: boolean | null | undefined,
+  enabled: boolean
+): { oldText: string; newText: string; diffStr: string; oldHash: string } {
+  const oldText = fs.existsSync(targetFilePath) ? fs.readFileSync(targetFilePath, 'utf-8') : '';
+  const oldHash = crypto.createHash('sha256').update(Buffer.from(oldText, 'utf-8')).digest('hex');
+
+  const lines = oldText.length > 0 ? oldText.split(/\r?\n/) : [];
+  const newLines = [...lines];
+
+  if (killSwitch !== undefined && killSwitch !== null) {
+    let inTriggersSection = false;
+    let foundEnabled = false;
+    for (let i = 0; i < lines.length; i++) {
+      const stripped = lines[i].trim();
+      if (stripped === '[triggers]') {
+        inTriggersSection = true;
+      } else if (stripped.startsWith('[') && stripped !== '[triggers]') {
+        if (inTriggersSection && !foundEnabled) {
+          newLines.splice(i, 0, `enabled = ${enabled ? 'true' : 'false'}`);
+          foundEnabled = true;
+        }
+        inTriggersSection = false;
+      } else if (inTriggersSection && /^enabled\s*=/i.test(stripped)) {
+        newLines[i] = `enabled = ${enabled ? 'true' : 'false'}`;
+        foundEnabled = true;
+        break;
+      }
+    }
+
+    if (!foundEnabled) {
+      if (!lines.some((l) => l.trim() === '[triggers]')) {
+        newLines.push('');
+        newLines.push('[triggers]');
+      }
+      newLines.push(`enabled = ${enabled ? 'true' : 'false'}`);
+    }
+  } else if (ruleName) {
+    let inTargetRule = false;
+    let foundEnabled = false;
+    const escapedRule = ruleName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const nameRe = new RegExp(`^name\\s*=\\s*["']${escapedRule}["']`);
+    for (let i = 0; i < lines.length; i++) {
+      const stripped = lines[i].trim();
+      if (stripped === '[[triggers]]' || stripped === '[[trigger]]') {
+        inTargetRule = false;
+      } else if (nameRe.test(stripped)) {
+        inTargetRule = true;
+      } else if (inTargetRule && /^enabled\s*=/i.test(stripped)) {
+        newLines[i] = `enabled = ${enabled ? 'true' : 'false'}`;
+        foundEnabled = true;
+        break;
+      } else if (inTargetRule && (stripped.startsWith('[') || stripped.startsWith('[['))) {
+        newLines.splice(i, 0, `enabled = ${enabled ? 'true' : 'false'}`);
+        foundEnabled = true;
+        inTargetRule = false;
+        break;
+      }
+    }
+
+    if (inTargetRule && !foundEnabled) {
+      newLines.push(`enabled = ${enabled ? 'true' : 'false'}`);
+    }
+  }
+
+  const newText = newLines.join('\n') + (oldText.endsWith('\n') || !oldText ? '\n' : '');
+  const diffStr = generateUnifiedDiff(oldText, newText, targetFilePath);
+  return { oldText, newText, diffStr, oldHash };
 }
 
 export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
@@ -1695,6 +1844,320 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
         reason,
       };
     }
+  },
+  getSessions: async (panel, payload, root) => {
+    const cmd = ['sessions', 'list', '--workspace', root];
+    if (payload?.role) cmd.push('--role', String(payload.role));
+    if (payload?.status) cmd.push('--status', String(payload.status));
+    if (payload?.tool) cmd.push('--tool', String(payload.tool));
+
+    const data = await panel.cliClient.runJsonCommand<any>(cmd, root);
+    const sessionsList = Array.isArray(data)
+      ? data
+      : (data && typeof data === 'object' && Array.isArray(data.sessions) ? data.sessions : []);
+    return { ok: true, sessions: sessionsList };
+  },
+  getSession: async (panel, payload, root) => {
+    const sessionId = String(payload?.sessionId || payload?.session_id || payload?.id || '').trim();
+    if (!sessionId) {
+      const err: any = new Error('sessionId is required');
+      err.status = 400;
+      throw err;
+    }
+    const cmd = ['sessions', 'show', sessionId, '--workspace', root];
+    try {
+      const data = await panel.cliClient.runJsonCommand<any>(cmd, root);
+      return data && typeof data === 'object' && !Array.isArray(data) ? data : { session: data };
+    } catch (e: any) {
+      const errStr = String(e?.data?.error || e?.message || '').toLowerCase();
+      if (errStr.includes('not found') || errStr.includes('no session')) {
+        const err: any = new Error(e.message || `Session not found: ${sessionId}`);
+        err.status = 404;
+        err.data = e.data;
+        throw err;
+      }
+      throw e;
+    }
+  },
+  getRoleHolder: async (panel, payload, root) => {
+    const roleName = String(payload?.role || 'orchestrator').trim();
+    const cmd = ['sessions', 'show', '--role', roleName, '--workspace', root];
+    try {
+      const data = await panel.cliClient.runJsonCommand<any>(cmd, root);
+      return data && typeof data === 'object' && !Array.isArray(data) ? data : { role: data };
+    } catch (e: any) {
+      const errStr = String(e?.data?.error || e?.message || '').toLowerCase();
+      if (errStr.includes('not found') || errStr.includes('no holder') || errStr.includes('no active holder')) {
+        const err: any = new Error(e.message || `No active holder for role: ${roleName}`);
+        err.status = 404;
+        err.data = e.data;
+        throw err;
+      }
+      throw e;
+    }
+  },
+  runTriggersOnce: async (panel, payload, root) => {
+    const cmd = ['triggers', 'run-once', '--workspace', root];
+    if (payload?.dry_run || payload?.dryRun) cmd.push('--dry-run');
+    if (payload?.role) cmd.push('--role', String(payload.role));
+
+    const data = await panel.cliClient.runJsonCommand<any>(cmd, root);
+    panel.postMessage({ type: 'triggers_run', result: data });
+    panel.postMessage({ type: 'changed', areas: ['triggers', 'events'] });
+    return data;
+  },
+  previewToggleTrigger: async (panel, payload, root) => {
+    const ruleName = payload?.rule_name || payload?.ruleName;
+    const killSwitch = payload?.kill_switch !== undefined ? payload.kill_switch : payload?.killSwitch;
+    const enabled = Boolean(payload?.enabled);
+
+    const targetCfg = getActiveTriggerConfigPath(root);
+    const { oldText, newText, diffStr, oldHash } = computeTriggerToggle(targetCfg, ruleName, killSwitch, enabled);
+
+    return {
+      ok: true,
+      path: targetCfg,
+      diff: diffStr,
+      hash: oldHash,
+      changed: oldText !== newText,
+    };
+  },
+  toggleTrigger: async (panel, payload, root) => {
+    const expectHash = payload?.expect_hash || payload?.expectHash;
+    if (!expectHash) {
+      const err: any = new Error('expect_hash is required');
+      err.status = 400;
+      throw err;
+    }
+
+    const ruleName = payload?.rule_name || payload?.ruleName;
+    const killSwitch = payload?.kill_switch !== undefined ? payload.kill_switch : payload?.killSwitch;
+    const enabled = Boolean(payload?.enabled);
+
+    const targetCfg = getActiveTriggerConfigPath(root);
+    const { oldText, newText, diffStr, oldHash } = computeTriggerToggle(targetCfg, ruleName, killSwitch, enabled);
+
+    if (String(expectHash).toLowerCase() !== oldHash.toLowerCase()) {
+      const err: any = new Error(`Config hash mismatch: expected ${expectHash}, actual ${oldHash}`);
+      err.status = 409;
+      throw err;
+    }
+
+    const parentDir = path.dirname(targetCfg);
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
+    fs.writeFileSync(targetCfg, newText, 'utf-8');
+
+    panel.postMessage({ type: 'config_updated' });
+    panel.postMessage({ type: 'changed', areas: ['config', 'triggers'] });
+
+    return {
+      ok: true,
+      applied: true,
+      path: targetCfg,
+      hash: crypto.createHash('sha256').update(Buffer.from(newText, 'utf-8')).digest('hex'),
+    };
+  },
+  getProposedActions: async (panel, payload, root) => {
+    const propDir = path.join(root, '.ai-orchestration', 'proposed_actions');
+    const records: any[] = [];
+    if (fs.existsSync(propDir) && fs.statSync(propDir).isDirectory()) {
+      const entries = fs.readdirSync(propDir).filter((name) => name.endsWith('.json') && !name.startsWith('.'));
+      entries.sort();
+      for (const entry of entries) {
+        const fullPath = path.join(propDir, entry);
+        try {
+          if (fs.statSync(fullPath).isFile()) {
+            const raw = fs.readFileSync(fullPath, 'utf-8');
+            records.push(JSON.parse(raw));
+          }
+        } catch {}
+      }
+    }
+    records.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    return {
+      ok: true,
+      proposed_actions: records,
+      count: records.length,
+    };
+  },
+  confirmProposedAction: async (panel, payload, root) => {
+    const actionId = String(payload?.actionId || payload?.action_id || payload?.id || '');
+    const err: any = new Error('Engine does not provide CLI commands for confirming proposed actions; listing only is currently supported.');
+    err.status = 400;
+    err.data = {
+      ok: false,
+      action_id: actionId,
+      error: 'not-implemented',
+      message: 'Engine does not provide CLI commands for confirming proposed actions; listing only is currently supported.',
+    };
+    throw err;
+  },
+  rejectProposedAction: async (panel, payload, root) => {
+    const actionId = String(payload?.actionId || payload?.action_id || payload?.id || '');
+    const err: any = new Error('Engine does not provide CLI commands for rejecting proposed actions; listing only is currently supported.');
+    err.status = 400;
+    err.data = {
+      ok: false,
+      action_id: actionId,
+      error: 'not-implemented',
+      message: 'Engine does not provide CLI commands for rejecting proposed actions; listing only is currently supported.',
+    };
+    throw err;
+  },
+  getQuestionsAwaitingApplication: async (panel, payload, root) => {
+    const tasksDir = path.join(root, 'tasks');
+    const data = await panel.cliClient.runJsonCommand<any>(
+      ['questions', 'list', '--tasks-dir', tasksDir, '--status', 'answered'],
+      root
+    );
+    const allQuestions = Array.isArray(data?.questions) ? data.questions : [];
+    const awaiting = allQuestions.filter((q: any) => !q.applied);
+    return {
+      ok: true,
+      questions: awaiting,
+      count: awaiting.length,
+    };
+  },
+  applyQuestion: async (panel, payload, root) => {
+    const qId = requireQuestionId(payload);
+    const tasksDir = path.join(root, 'tasks');
+    const cmd = ['questions', 'apply', qId, '--tasks-dir', tasksDir];
+    if (payload?.by) cmd.push('--by', String(payload.by));
+    if (payload?.ref) cmd.push('--ref', String(payload.ref));
+    if (payload?.note) cmd.push('--note', String(payload.note));
+    if (payload?.force) cmd.push('--force');
+    if (payload?.dry_run || payload?.dryRun) cmd.push('--dry-run');
+
+    const data = await panel.cliClient.runJsonCommand<any>(cmd, root);
+    if (!payload?.dry_run && !payload?.dryRun) {
+      panel.postMessage({ type: 'question_applied', question_id: qId });
+      panel.postMessage({ type: 'changed', areas: ['questions', 'tasks'] });
+    }
+    return (data && typeof data === 'object') ? data : { ok: true, id: qId };
+  },
+  getOrchestratorQueue: async (panel, payload, root) => {
+    const qDir = path.join(root, '.ai-orchestration', 'orchestrator', 'queue');
+    const items: any[] = [];
+    if (fs.existsSync(qDir) && fs.statSync(qDir).isDirectory()) {
+      const entries = fs.readdirSync(qDir).filter((name) => name.endsWith('.json') && !name.startsWith('.'));
+      entries.sort();
+      for (const entry of entries) {
+        const fullPath = path.join(qDir, entry);
+        try {
+          if (fs.statSync(fullPath).isFile()) {
+            const raw = fs.readFileSync(fullPath, 'utf-8');
+            items.push(JSON.parse(raw));
+          }
+        } catch {}
+      }
+    }
+    items.sort((a, b) => Number(a.turn_seq || 0) - Number(b.turn_seq || 0));
+    return {
+      ok: true,
+      queue: items,
+      count: items.length,
+    };
+  },
+  getNotifications: async (panel, payload, root) => {
+    const notifDir = path.join(root, '.ai-orchestration', 'notifications');
+    const notifications: any[] = [];
+    if (fs.existsSync(notifDir) && fs.statSync(notifDir).isDirectory()) {
+      const entries = fs.readdirSync(notifDir).filter((name) => name.endsWith('.json') && !name.startsWith('.'));
+      entries.sort();
+      for (const entry of entries) {
+        const fullPath = path.join(notifDir, entry);
+        try {
+          if (fs.statSync(fullPath).isFile()) {
+            const raw = fs.readFileSync(fullPath, 'utf-8');
+            notifications.push(JSON.parse(raw));
+          }
+        } catch {}
+      }
+    }
+    notifications.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+
+    let recentEvents: any[] = [];
+    try {
+      const res = await panel.cliClient.runJsonCommand<any>(
+        ['events', 'tail', '--limit', '25', '--workspace', root],
+        root
+      );
+      if (res && Array.isArray(res.events)) {
+        recentEvents = res.events;
+      }
+    } catch {}
+
+    const unreadCount = notifications.filter((n) => !n.read).length;
+    return {
+      ok: true,
+      notifications,
+      recent_events: recentEvents,
+      unread_count: unreadCount,
+    };
+  },
+  markNotificationRead: async (panel, payload, root) => {
+    const notifId = String(payload?.id || payload?.notifId || payload?.notif_id || '').trim();
+    const notifDir = path.join(root, '.ai-orchestration', 'notifications');
+
+    if (!notifId || notifId.includes('/') || notifId.includes('\\') || notifId.includes('..')) {
+      const err: any = new Error(`Invalid notification ID ${JSON.stringify(notifId)}`);
+      err.status = 400;
+      throw err;
+    }
+
+    if (notifId === 'all') {
+      if (fs.existsSync(notifDir) && fs.statSync(notifDir).isDirectory()) {
+        const entries = fs.readdirSync(notifDir).filter((name) => name.endsWith('.json') && !name.startsWith('.'));
+        for (const entry of entries) {
+          const fullPath = path.join(notifDir, entry);
+          try {
+            const data = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
+            data.read = true;
+            fs.writeFileSync(fullPath, JSON.stringify(data, null, 2), 'utf-8');
+          } catch {}
+        }
+      }
+      panel.postMessage({ type: 'changed', areas: ['notifications'] });
+      return { ok: true, marked_all: true };
+    }
+
+    const filename = notifId.endsWith('.json') ? notifId : `${notifId}.json`;
+    const target = path.join(notifDir, filename);
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+      const err: any = new Error('Notification not found');
+      err.status = 404;
+      throw err;
+    }
+
+    try {
+      const data = JSON.parse(fs.readFileSync(target, 'utf-8'));
+      data.read = true;
+      fs.writeFileSync(target, JSON.stringify(data, null, 2), 'utf-8');
+      panel.postMessage({ type: 'changed', areas: ['notifications'] });
+      return { ok: true, id: notifId };
+    } catch (e: any) {
+      const err: any = new Error(e.message || String(e));
+      err.status = 500;
+      throw err;
+    }
+  },
+  markAllNotificationsRead: async (panel, payload, root) => {
+    const notifDir = path.join(root, '.ai-orchestration', 'notifications');
+    if (fs.existsSync(notifDir) && fs.statSync(notifDir).isDirectory()) {
+      const entries = fs.readdirSync(notifDir).filter((name) => name.endsWith('.json') && !name.startsWith('.'));
+      for (const entry of entries) {
+        const fullPath = path.join(notifDir, entry);
+        try {
+          const data = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
+          data.read = true;
+          fs.writeFileSync(fullPath, JSON.stringify(data, null, 2), 'utf-8');
+        } catch {}
+      }
+    }
+    panel.postMessage({ type: 'changed', areas: ['notifications'] });
+    return { ok: true, marked_all: true };
   },
 };
 

@@ -88,32 +88,26 @@ function runBridgeParityCheck() {
     'cleanupRun',
   ]);
 
-  const pending126Types = new Set([
-    'getSessions',
-    'getSession',
-    'getRoleHolder',
-    'getTriggers',
-    'getTriggersStatus',
-    'getTriggersHistory',
-    'runTriggersOnce',
-    'previewToggleTrigger',
-    'toggleTrigger',
-    'getProposedActions',
-    'confirmProposedAction',
-    'rejectProposedAction',
-    'getQuestionsAwaitingApplication',
-    'applyQuestion',
-    'getOrchestratorQueue',
-    'getNotifications',
-    'markNotificationRead',
-    'markAllNotificationsRead',
+  const pending126Types = new Set([]);
+
+  // 12.8 orchestrator chat messages: bridged by task 12.17 (VS Code parity for 12.8/12.10/12.16).
+  const pending128Types = new Set([
+    'getOrchestratorStatus',
+    'postOrchestratorChat',
+    'getOrchestratorConversation',
+    'getOrchestratorTurn',
+    'pauseOrchestrator',
+    'resumeOrchestrator',
+    'rotateOrchestrator',
+    'cancelOrchestratorTurn',
+    'runNextOrchestratorTurn',
   ]);
 
   const missing = [];
   const pending = [];
   for (const t of apiTypes) {
     if (!handledTypes.has(t)) {
-      if (pending079Types.has(t) || pending126Types.has(t)) {
+      if (pending079Types.has(t) || pending126Types.has(t) || pending128Types.has(t)) {
         pending.push(t);
       } else {
         missing.push(t);

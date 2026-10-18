@@ -40,6 +40,9 @@ import {
   extractLabels,
   checkOriginRunContinuable,
   formatContinuationInstructions,
+  getActiveTriggerConfigPath,
+  generateUnifiedDiff,
+  computeTriggerToggle,
 } from './views/dashboard-panel';
 import { WorkspaceManager } from './workspace-manager';
 import {
@@ -87,6 +90,9 @@ export {
   extractLabels,
   checkOriginRunContinuable,
   formatContinuationInstructions,
+  getActiveTriggerConfigPath,
+  generateUnifiedDiff,
+  computeTriggerToggle,
   DashboardPanel,
   CliClient,
   isReadOnlyCommand,
