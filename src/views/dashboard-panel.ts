@@ -824,6 +824,18 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
   setKind: setKindArgs(false),
   previewSetLabels: setLabelsArgs(true),
   setLabels: setLabelsArgs(false),
+  getEvents: (payload, root) => {
+    const args = ['events', 'tail', '--workspace', root];
+    if (payload?.since !== undefined) args.push('--since', String(payload.since));
+    if (payload?.limit !== undefined) args.push('--limit', String(payload.limit));
+    if (payload?.type) {
+      const types = Array.isArray(payload.type) ? payload.type : [payload.type];
+      for (const t of types) args.push('--type', String(t));
+    }
+    if (payload?.session) args.push('--session', String(payload.session));
+    return args;
+  },
+  getEventsStats: (payload, root) => ['events', 'stats', '--workspace', root],
 };
 
 export function checkOriginRunContinuable(
@@ -1883,6 +1895,12 @@ export class DashboardPanel {
       return;
     }
 
+    const eventsDir = path.join(this._boundRoot, '.ai-orchestration', 'events');
+    if (fs.existsSync(eventsDir)) {
+      // Event stream covers changes; ad-hoc watchers replaced
+      return;
+    }
+
     // Watch bound folder's tasks/**
     const tasksPattern = new vscode.RelativePattern(this._boundRoot, 'tasks/**');
     const tasksWatcher = vscode.workspace.createFileSystemWatcher(tasksPattern);
@@ -1953,6 +1971,13 @@ export class DashboardPanel {
   /** Called by the extension's own refresh: updates the webview only. */
   public notifyQuestionsChanged() {
     this._notifyQuestionsChanged(false);
+  }
+
+  /** Called when new events arrive from the event stream: updates the webview only. */
+  public notifyAreasChanged(areas: string[]) {
+    if (this._panel && Array.isArray(areas) && areas.length > 0) {
+      this._panel.webview.postMessage({ type: 'changed', areas });
+    }
   }
 
   public postMessage(message: any): Thenable<boolean> {

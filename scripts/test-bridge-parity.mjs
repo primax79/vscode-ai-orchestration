@@ -88,11 +88,32 @@ function runBridgeParityCheck() {
     'cleanupRun',
   ]);
 
+  const pending126Types = new Set([
+    'getSessions',
+    'getSession',
+    'getRoleHolder',
+    'getTriggers',
+    'getTriggersStatus',
+    'getTriggersHistory',
+    'runTriggersOnce',
+    'previewToggleTrigger',
+    'toggleTrigger',
+    'getProposedActions',
+    'confirmProposedAction',
+    'rejectProposedAction',
+    'getQuestionsAwaitingApplication',
+    'applyQuestion',
+    'getOrchestratorQueue',
+    'getNotifications',
+    'markNotificationRead',
+    'markAllNotificationsRead',
+  ]);
+
   const missing = [];
   const pending = [];
   for (const t of apiTypes) {
     if (!handledTypes.has(t)) {
-      if (pending079Types.has(t)) {
+      if (pending079Types.has(t) || pending126Types.has(t)) {
         pending.push(t);
       } else {
         missing.push(t);
@@ -101,7 +122,7 @@ function runBridgeParityCheck() {
   }
 
   if (pending.length > 0) {
-    console.log(`NOTE: ${pending.length} run message types are pending task 07.9:`, pending);
+    console.log(`NOTE: ${pending.length} message types are pending upcoming UI tasks:`, pending);
   }
 
   if (missing.length > 0) {
