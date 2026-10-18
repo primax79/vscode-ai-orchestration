@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { CliClient } from './cli-client';
+import { CliClient, isReadOnlyCommand } from './cli-client';
 import { TaskTreeProvider, TaskTreeItem } from './views/task-tree-provider';
 import {
   DecisionsTreeProvider,
@@ -27,6 +27,19 @@ import {
   requireTaskAttachmentId,
   runTargetArgs,
   classifyAttachmentContentType,
+  TREE_NODE_ID_RE,
+  requireTreeNodeId,
+  QUESTION_ID_RE,
+  requireQuestionId,
+  MICRO_ID_RE,
+  requireMicrotaskId,
+  VALID_KINDS,
+  VALID_PRIORITIES,
+  VALID_SIZES,
+  LABEL_RE,
+  extractLabels,
+  checkOriginRunContinuable,
+  formatContinuationInstructions,
 } from './views/dashboard-panel';
 import { WorkspaceManager } from './workspace-manager';
 import {
@@ -52,8 +65,22 @@ export {
   requireTaskAttachmentId,
   runTargetArgs,
   classifyAttachmentContentType,
+  TREE_NODE_ID_RE,
+  requireTreeNodeId,
+  QUESTION_ID_RE,
+  requireQuestionId,
+  MICRO_ID_RE,
+  requireMicrotaskId,
+  VALID_KINDS,
+  VALID_PRIORITIES,
+  VALID_SIZES,
+  LABEL_RE,
+  extractLabels,
+  checkOriginRunContinuable,
+  formatContinuationInstructions,
   DashboardPanel,
   CliClient,
+  isReadOnlyCommand,
   DecisionsTreeProvider,
   DecisionGroupTreeItem,
   DecisionQuestionTreeItem,

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { CliClient, CliError } from '../cli-client';
 
 export type CliArgBuilder = (payload: any, root: string) => string[];
@@ -143,13 +144,67 @@ export function classifyAttachmentContentType(buf: Buffer): string | null {
   return null;
 }
 
-// Timeline (10.2): same CLI arguments as the web backend's /api/tasks/{id}/priority|size|deps.
-const TASK_MUTATION_ID_RE = /^(T\d{3,}|\d{2,}\.\d+)$/;
-const mutationTaskId = (payload: any): string => {
-  const id = String(payload?.taskId || payload?.task_id || '');
-  if (!TASK_MUTATION_ID_RE.test(id)) throw new Error(`Invalid task id ${JSON.stringify(id)}`);
+// Timeline (10.2) & Tree Structure (11.3): same CLI arguments as the web backend's /api/tasks/{id}/priority|size|deps|kind|labels.
+export const TREE_NODE_ID_RE = /^(T\d{3,}(\.\d+)*|\d{2,}\.\d+(\.\d+)*)$/;
+export const requireTreeNodeId = (payload: any): string => {
+  const id = String(payload?.id || payload?.taskId || payload?.task_id || payload?.node_id || payload?.parentId || payload?.parent_id || payload?.parent || '');
+  if (!TREE_NODE_ID_RE.test(id)) {
+    const err: any = new Error(`Invalid tree node ID ${JSON.stringify(id)}`);
+    err.status = 400;
+    throw err;
+  }
   return id;
 };
+
+export const QUESTION_ID_RE = /^Q\d{3,}$/;
+export const requireQuestionId = (payload: any): string => {
+  const id = String(payload?.id || payload?.questionId || payload?.question_id || '');
+  if (!QUESTION_ID_RE.test(id)) {
+    const err: any = new Error(`Invalid question ID ${JSON.stringify(id)}, must match ^Q\\d{3,}$`);
+    err.status = 400;
+    throw err;
+  }
+  return id;
+};
+
+export const MICRO_ID_RE = /^T\d{3,}$/;
+export const requireMicrotaskId = (payload: any): string => {
+  const id = String(payload?.taskId || payload?.task_id || payload?.id || '');
+  if (!MICRO_ID_RE.test(id)) {
+    const err: any = new Error(`Invalid microtask id ${JSON.stringify(id)}`);
+    err.status = 400;
+    throw err;
+  }
+  return id;
+};
+
+export const VALID_KINDS = new Set(['bug', 'chore', 'docs', 'feature', 'fix', 'investigation']);
+export const VALID_PRIORITIES = new Set(['P0', 'P1', 'P2', 'P3']);
+export const VALID_SIZES = new Set(['XS', 'S', 'M', 'L', 'XL']);
+export const LABEL_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+export function extractLabels(val: any): string[] {
+  if (!val) return [];
+  if (Array.isArray(val)) {
+    const items: string[] = [];
+    for (const x of val) {
+      if (typeof x === 'string') {
+        items.push(...x.trim().split(/[\s,]+/).map((p) => p.trim().toLowerCase()).filter(Boolean));
+      } else if (x !== undefined && x !== null) {
+        const s = String(x).trim().toLowerCase();
+        if (s) items.push(s);
+      }
+    }
+    return items;
+  }
+  if (typeof val === 'string') {
+    return val.trim().split(/[\s,]+/).map((p) => p.trim().toLowerCase()).filter(Boolean);
+  }
+  return [];
+}
+
+const TASK_MUTATION_ID_RE = TREE_NODE_ID_RE;
+const mutationTaskId = requireTreeNodeId;
 const depIds = (v: any): string[] =>
   (Array.isArray(v) ? v : v ? [v] : [])
     .flatMap((x: any) => String(x).split(/[\s,]+/))
@@ -161,6 +216,18 @@ const mutationTail = (payload: any, preview: boolean): string[] => {
   const tail: string[] = [];
   if (preview) tail.push('--dry-run');
   if (h) tail.push('--expect-task-hash', String(h));
+  return tail;
+};
+const planMutationTail = (payload: any, preview: boolean): string[] => {
+  const h = payload?.expect_plan_hash || payload?.expect_hash || payload?.plan_hash;
+  if (!preview && !h) {
+    const err: any = new Error('expect_plan_hash is required');
+    err.status = 400;
+    throw err;
+  }
+  const tail: string[] = [];
+  if (preview) tail.push('--dry-run');
+  if (h) tail.push('--expect-plan-hash', String(h));
   return tail;
 };
 const priorityArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
@@ -184,6 +251,139 @@ const depsArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
   if (remove.length) args.push('--remove', ...remove);
   if (to) args.push('--to', ...to);
   return [...args, ...mutationTail(payload, preview)];
+};
+
+const addChildArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const parentId = requireTreeNodeId(payload);
+  const title = payload?.title ? String(payload.title).trim() : '';
+  if (!title) {
+    const err: any = new Error('title is required');
+    err.status = 400;
+    throw err;
+  }
+  const kind = payload?.kind ? String(payload.kind).trim() : 'feature';
+  const args = ['tasks', 'child', 'add', parentId, '--title', title, '--kind', kind, '--tasks-dir', path.join(root, 'tasks')];
+  return [...args, ...planMutationTail(payload, preview)];
+};
+
+const expandTaskArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const nodeId = requireTreeNodeId(payload);
+  const args = ['tasks', 'expand', nodeId, '--tasks-dir', path.join(root, 'tasks')];
+  return [...args, ...planMutationTail(payload, preview)];
+};
+
+const collapseTaskArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const nodeId = requireTreeNodeId(payload);
+  const args = ['tasks', 'collapse', nodeId, '--tasks-dir', path.join(root, 'tasks')];
+  return [...args, ...planMutationTail(payload, preview)];
+};
+
+const reopenTaskArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const nodeId = requireTreeNodeId(payload);
+  const reason = payload?.reason ? String(payload.reason).trim() : '';
+  if (!reason) {
+    const err: any = new Error('reason is required');
+    err.status = 400;
+    throw err;
+  }
+  const args = ['tasks', 'reopen', nodeId, '--reason', reason, '--tasks-dir', path.join(root, 'tasks')];
+  return [...args, ...planMutationTail(payload, preview)];
+};
+
+const setKindArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const taskId = requireTreeNodeId(payload);
+  const kind = String(payload?.kind || '').trim().toLowerCase();
+  if (!kind) {
+    const err: any = new Error('kind is required');
+    err.status = 400;
+    throw err;
+  }
+  if (!VALID_KINDS.has(kind)) {
+    const err: any = new Error(`Invalid kind ${JSON.stringify(kind)}, expected one of ${Array.from(VALID_KINDS).sort().join(', ')}`);
+    err.status = 400;
+    throw err;
+  }
+  return ['tasks', 'set-kind', taskId, kind, '--tasks-dir', path.join(root, 'tasks'), ...mutationTail(payload, preview)];
+};
+
+const setLabelsArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const taskId = requireTreeNodeId(payload);
+  const addLabels = extractLabels(payload?.add);
+  const removeLabels = extractLabels(payload?.remove);
+  const toSpecified = payload?.to !== undefined || payload?.labels !== undefined;
+  const toLabels = extractLabels(payload?.to !== undefined ? payload.to : payload?.labels);
+
+  if (!addLabels.length && !removeLabels.length && !toSpecified) {
+    const err: any = new Error('at least one of add, remove, or to/labels is required');
+    err.status = 400;
+    throw err;
+  }
+
+  for (const lbl of [...addLabels, ...removeLabels, ...toLabels]) {
+    if (!LABEL_RE.test(lbl)) {
+      const err: any = new Error(`Invalid label format ${JSON.stringify(lbl)}, must match ^[a-z0-9][a-z0-9-]{0,23}$`);
+      err.status = 400;
+      throw err;
+    }
+  }
+
+  const args = ['tasks', 'set-labels', taskId, '--tasks-dir', path.join(root, 'tasks')];
+  if (addLabels.length) args.push('--add', ...addLabels);
+  if (removeLabels.length) args.push('--remove', ...removeLabels);
+  if (toSpecified) args.push('--to', ...toLabels);
+  return [...args, ...mutationTail(payload, preview)];
+};
+
+const createMicrotaskArgs: CliArgBuilder = (payload, root) => {
+  const title = payload?.title ? String(payload.title).trim() : '';
+  if (!title) {
+    const err: any = new Error('title is required');
+    err.status = 400;
+    throw err;
+  }
+  const kind = payload?.kind ? String(payload.kind).trim().toLowerCase() : 'chore';
+  if (!VALID_KINDS.has(kind)) {
+    const err: any = new Error(`Invalid kind ${JSON.stringify(kind)}, expected one of ${Array.from(VALID_KINDS).sort().join(', ')}`);
+    err.status = 400;
+    throw err;
+  }
+  const priority = payload?.priority ? String(payload.priority).trim().toUpperCase() : 'P2';
+  if (!VALID_PRIORITIES.has(priority)) {
+    const err: any = new Error(`Invalid priority ${JSON.stringify(priority)}, expected one of ${Array.from(VALID_PRIORITIES).sort().join(', ')}`);
+    err.status = 400;
+    throw err;
+  }
+  const args = ['tasks', 'micro', '--title', title, '--kind', kind, '--priority', priority, '--tasks-dir', path.join(root, 'tasks')];
+  if (payload?.paths) args.push('--paths', String(payload.paths));
+  const dependsOn = payload?.depends_on || payload?.dependsOn;
+  if (dependsOn) args.push('--depends-on', String(dependsOn));
+  if (payload?.size) {
+    const sz = String(payload.size).trim().toUpperCase();
+    if (!VALID_SIZES.has(sz)) {
+      const err: any = new Error(`Invalid size ${JSON.stringify(sz)}`);
+      err.status = 400;
+      throw err;
+    }
+    args.push('--size', sz);
+  }
+  if (payload?.executor) args.push('--executor', String(payload.executor));
+  if (payload?.what) args.push('--what', String(payload.what));
+  const labels = extractLabels(payload?.labels || payload?.label);
+  for (const lbl of labels) {
+    if (!LABEL_RE.test(lbl)) {
+      const err: any = new Error(`Invalid label format ${JSON.stringify(lbl)}, must match ^[a-z0-9][a-z0-9-]{0,23}$`);
+      err.status = 400;
+      throw err;
+    }
+    args.push('--label', lbl);
+  }
+  return args;
+};
+
+const promoteMicrotaskArgs: CliArgBuilder = (payload, root) => {
+  const taskId = requireMicrotaskId(payload);
+  const category = String(payload?.category || 'maintenance').trim() || 'maintenance';
+  return ['tasks', 'promote', taskId, '--category', category, '--tasks-dir', path.join(root, 'tasks')];
 };
 
 export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
@@ -609,7 +809,98 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     }
     return args;
   },
+  previewAddChild: addChildArgs(true),
+  addChild: addChildArgs(false),
+  previewExpandTask: expandTaskArgs(true),
+  expandTask: expandTaskArgs(false),
+  previewCollapseTask: collapseTaskArgs(true),
+  collapseTask: collapseTaskArgs(false),
+  previewReopenTask: reopenTaskArgs(true),
+  reopenTask: reopenTaskArgs(false),
+  getLabels: (payload, root) => ['tasks', 'labels', '--tasks-dir', path.join(root, 'tasks')],
+  createMicrotask: createMicrotaskArgs,
+  promoteMicrotask: promoteMicrotaskArgs,
+  previewSetKind: setKindArgs(true),
+  setKind: setKindArgs(false),
+  previewSetLabels: setLabelsArgs(true),
+  setLabels: setLabelsArgs(false),
 };
+
+export function checkOriginRunContinuable(
+  root: string,
+  originRun: string | null | undefined
+): { isCont: boolean; reason: string | null; record: any } {
+  if (!originRun || originRun === '-' || !String(originRun).trim()) {
+    return { isCont: false, reason: 'Question has no origin-run', record: null };
+  }
+  const id = String(originRun).trim();
+  if (!RUN_ID_RE.test(id)) {
+    return { isCont: false, reason: `Invalid origin-run id ${JSON.stringify(id)}`, record: null };
+  }
+
+  const runDir = path.join(root, '.ai-orchestration', 'runs', id);
+  const runJson = path.join(runDir, 'run.json');
+  if (!fs.existsSync(runJson) || !fs.statSync(runJson).isFile()) {
+    return { isCont: false, reason: `Origin run '${id}' not found in runs registry`, record: null };
+  }
+
+  let record: any;
+  try {
+    record = JSON.parse(fs.readFileSync(runJson, 'utf-8'));
+  } catch (e: any) {
+    return { isCont: false, reason: `Failed to read run record for '${id}': ${e.message}`, record: null };
+  }
+
+  const status = record?.status;
+  if (!['succeeded', 'failed', 'cancelled', 'lost'].includes(status)) {
+    return { isCont: false, reason: `Origin run '${id}' is not terminal (status: ${status})`, record };
+  }
+
+  if (!record?.session_id) {
+    return { isCont: false, reason: `Origin run '${id}' has no session_id; cannot continue`, record };
+  }
+
+  if (record?.mode === 'execute' && record?.isolation === 'worktree') {
+    const wtP = record?.worktree_path || record?.cwd || '';
+    if (!wtP || !fs.existsSync(wtP) || !fs.statSync(wtP).isDirectory() || record?.worktree_removed === true) {
+      return { isCont: false, reason: `Worktree '${wtP}' for run '${id}' does not exist`, record };
+    }
+  }
+
+  return { isCont: true, reason: null, record };
+}
+
+export function formatContinuationInstructions(
+  questionId: string,
+  questionText: string,
+  choice: string,
+  freeText?: string | null,
+  options?: any[]
+): string {
+  let chosenLabelTitle = choice;
+  if (choice === 'open') {
+    chosenLabelTitle = 'Open answer';
+  } else if (options && Array.isArray(options)) {
+    for (const opt of options) {
+      if (typeof opt === 'object' && opt !== null && opt.label === choice) {
+        const title = opt.title || opt.text || '';
+        if (title) {
+          chosenLabelTitle = `${choice} \u2014 ${title}`;
+        } else {
+          chosenLabelTitle = choice;
+        }
+        break;
+      }
+    }
+  }
+
+  const qSummary = (questionText || '').trim();
+  const parts = [`Answer to ${questionId} (${qSummary}): ${chosenLabelTitle}.`];
+  if (freeText && String(freeText).trim()) {
+    parts.push(String(freeText).trim());
+  }
+  return parts.join(' ');
+}
 
 export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
   getWorkspace: async (panel, payload, root) => {
@@ -1102,6 +1393,297 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
       proposal,
     };
   },
+  previewPromoteMicrotask: async (panel, payload, root) => {
+    const taskId = requireMicrotaskId(payload);
+    const category = String(payload?.category || 'maintenance').trim() || 'maintenance';
+    const tasksDir = path.join(root, 'tasks');
+
+    let targetFile: string | null = null;
+    for (const pdir of [path.join(tasksDir, 'micro'), path.join(tasksDir, 'done', 'micro')]) {
+      if (fs.existsSync(pdir) && fs.statSync(pdir).isDirectory()) {
+        const files = fs.readdirSync(pdir);
+        for (const f of files) {
+          if (f.startsWith(`${taskId}-`) && f.endsWith('.md') && f !== 'README.md') {
+            targetFile = path.join(pdir, f);
+            break;
+          }
+        }
+      }
+      if (targetFile) break;
+    }
+
+    if (!targetFile || !fs.existsSync(targetFile)) {
+      const err: any = new Error(`Microtask ${taskId} not found in tasks/micro/`);
+      err.status = 404;
+      throw err;
+    }
+
+    const fileBytes = fs.readFileSync(targetFile);
+    const taskHash = crypto.createHash('sha256').update(fileBytes).digest('hex');
+
+    const expectTaskHash = payload?.expect_task_hash || payload?.expect_hash;
+    if (expectTaskHash && String(expectTaskHash).toLowerCase() !== taskHash.toLowerCase()) {
+      const err: any = new Error(`Task hash mismatch: expected ${expectTaskHash}, actual ${taskHash}`);
+      err.status = 409;
+      throw err;
+    }
+
+    const baseName = path.basename(targetFile);
+    const diffStr = `--- ${baseName}\n+++ tasks/${category}/${baseName}\n(Promote microtask to full emergent task in category '${category}' with Goal, Steps, and Verification)\n`;
+    return {
+      ok: true,
+      dry_run: true,
+      id: taskId,
+      task_id: taskId,
+      category,
+      summary: `Promote microtask ${taskId} to category '${category}'`,
+      diff: diffStr,
+      hash: taskHash,
+      task_hash: taskHash,
+      base_task_hash: taskHash,
+    };
+  },
+  inboxToMicrotask: async (panel, payload, root) => {
+    const noteId = requireNoteId({ id: payload?.noteId || payload?.id || payload?.note_id });
+    const tasksDir = path.join(root, 'tasks');
+
+    let note: any = {};
+    try {
+      const showData = await panel.cliClient.runJsonCommand<any>(['inbox', 'show', noteId, '--tasks-dir', tasksDir], root);
+      if (!showData || !showData.ok || !showData.note) {
+        const err: any = new Error(`Note ${noteId} not found`);
+        err.status = 404;
+        throw err;
+      }
+      note = showData.note;
+    } catch (e: any) {
+      if (e.status === 404 || String(e.message).includes('not found')) {
+        const err: any = new Error(`Note ${noteId} not found`);
+        err.status = 404;
+        throw err;
+      }
+      throw e;
+    }
+
+    const title = String(payload?.title || note.title || `Issue from note ${noteId}`).trim();
+    let kind = String(payload?.kind || (VALID_KINDS.has(note.kind) ? note.kind : 'bug')).trim().toLowerCase();
+    if (!VALID_KINDS.has(kind)) kind = 'bug';
+    const priority = String(payload?.priority || 'P2').trim().toUpperCase();
+    const what = payload?.what || note.body || `Created from inbox note ${noteId}.`;
+
+    const labels = extractLabels(payload?.labels || payload?.label);
+    if (!labels.length && note.about) {
+      for (const ab of String(note.about).split(/[\s,]+/)) {
+        const clean = ab.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+        if (clean && LABEL_RE.test(clean) && !labels.includes(clean)) {
+          labels.push(clean);
+        }
+      }
+    }
+
+    const cmd = [
+      'tasks', 'micro',
+      '--title', title,
+      '--kind', kind,
+      '--priority', priority,
+      '--tasks-dir', tasksDir,
+    ];
+    if (payload?.paths) cmd.push('--paths', String(payload.paths));
+    const dependsOn = payload?.depends_on || payload?.dependsOn;
+    if (dependsOn) cmd.push('--depends-on', String(dependsOn));
+    if (payload?.executor) cmd.push('--executor', String(payload.executor));
+    if (what) cmd.push('--what', String(what));
+    for (const lbl of labels) {
+      cmd.push('--label', lbl);
+    }
+
+    const res = await panel.cliClient.runJsonCommand<any>(cmd, root);
+    const taskId = res?.id;
+    if (taskId) {
+      try {
+        await panel.cliClient.runJsonCommand<any>(['inbox', 'resolve', noteId, '--produced', taskId, '--tasks-dir', tasksDir], root);
+      } catch {}
+    }
+
+    panel.postMessage({ type: 'changed', areas: ['inbox', 'tasks'] });
+    if (taskId) {
+      panel.postMessage({ type: 'task_created', task_id: taskId });
+    }
+    if (panel.onTasksUpdated) panel.onTasksUpdated();
+    return res;
+  },
+  previewAnswerAndResume: async (panel, payload, root) => {
+    const qid = requireQuestionId(payload);
+    const choice = payload?.choice;
+    if (!choice) {
+      const err: any = new Error('choice is required');
+      err.status = 400;
+      throw err;
+    }
+
+    const tasksDir = path.join(root, 'tasks');
+    const qRes = await panel.cliClient.runJsonCommand<any>(['questions', 'show', qid, '--tasks-dir', tasksDir], root);
+    const qData = qRes?.question || qRes || {};
+    if (qData.status && qData.status !== 'open') {
+      const err: any = new Error(`Question ${qid} is already ${qData.status}`);
+      err.status = 400;
+      throw err;
+    }
+
+    const originRun = qData.origin_run || qData['origin-run'];
+    const { isCont, reason, record } = checkOriginRunContinuable(root, originRun);
+
+    if (!isCont) {
+      return {
+        ok: true,
+        continuable: false,
+        can_resume: false,
+        reason,
+        question_id: qid,
+        origin_run: originRun && originRun !== '-' ? originRun : null,
+      };
+    }
+
+    const planHash = record?.plan_hash || '';
+    const prompt = formatContinuationInstructions(
+      qid,
+      qData.question || '',
+      String(choice),
+      payload?.text,
+      qData.options
+    );
+
+    return {
+      ok: true,
+      continuable: true,
+      can_resume: true,
+      run_id: originRun,
+      origin_run: originRun,
+      question_id: qid,
+      plan_hash: planHash,
+      prompt,
+      instructions: prompt,
+    };
+  },
+  answerAndResume: async (panel, payload, root) => {
+    const qid = requireQuestionId(payload);
+    const choice = payload?.choice;
+    if (!choice) {
+      const err: any = new Error('choice is required');
+      err.status = 400;
+      throw err;
+    }
+
+    const tasksDir = path.join(root, 'tasks');
+    const qRes = await panel.cliClient.runJsonCommand<any>(['questions', 'show', qid, '--tasks-dir', tasksDir], root);
+    const qData = qRes?.question || qRes || {};
+    if (qData.status && qData.status !== 'open') {
+      const err: any = new Error(`Question ${qid} is already ${qData.status}`);
+      err.status = 400;
+      throw err;
+    }
+
+    const originRun = qData.origin_run || qData['origin-run'];
+    const { isCont, reason, record } = checkOriginRunContinuable(root, originRun);
+
+    const textStr = payload?.text !== undefined && payload?.text !== null ? String(payload.text) : null;
+    if (textStr && Buffer.byteLength(textStr, 'utf-8') > 32 * 1024) {
+      const err: any = new Error('Answer text exceeds 32 KB limit');
+      err.status = 400;
+      throw err;
+    }
+
+    if (isCont) {
+      const planHash = record?.plan_hash || '';
+      const expectPlanHash = payload?.expect_plan_hash || payload?.expect_hash;
+      if (!expectPlanHash) {
+        const err: any = new Error('expect_plan_hash is required for continuable run');
+        err.status = 400;
+        throw err;
+      }
+      if (String(expectPlanHash).trim().toLowerCase() !== planHash.trim().toLowerCase()) {
+        const err: any = new Error(`Plan hash mismatch: expected ${expectPlanHash}, actual ${planHash}`);
+        err.status = 409;
+        err.data = {
+          error: 'plan-hash-mismatch',
+          detail: `Plan hash mismatch: expected ${expectPlanHash}, actual ${planHash}`,
+        };
+        throw err;
+      }
+    }
+
+    // 1. Answer question
+    const ansCmd = ['questions', 'answer', qid, '--choice', String(choice), '--tasks-dir', tasksDir];
+    if (textStr) ansCmd.push('--text', textStr);
+    if (payload?.by) ansCmd.push('--by', String(payload.by));
+
+    await panel.cliClient.runJsonCommand<any>(ansCmd, root);
+
+    // 2. If continuable, start continuation run
+    if (isCont) {
+      const prompt = formatContinuationInstructions(
+        qid,
+        qData.question || '',
+        String(choice),
+        textStr,
+        qData.options
+      );
+      const continueCmd = [
+        'run', 'start',
+        '--continue', originRun,
+        '--instructions', prompt,
+        '--expect-plan-hash', record?.plan_hash || '',
+        '--requested-by', 'vscode',
+        '--workspace', root,
+      ];
+
+      let rData: any = null;
+      let rErr: any = null;
+      try {
+        rData = await panel.cliClient.runJsonCommand<any>(continueCmd, root);
+      } catch (e: any) {
+        rErr = e;
+      }
+
+      panel.postMessage({ type: 'changed', areas: ['questions', 'tasks', 'runs'] });
+      panel.postMessage({ type: 'question_answered', question_id: qid, choice: String(choice) });
+      if (panel.onTasksUpdated) panel.onTasksUpdated();
+
+      if (!rErr) {
+        return {
+          ok: true,
+          question_id: qid,
+          choice,
+          resumed: true,
+          run_id: rData?.run_id ?? null,
+          continued_from: originRun,
+          instructions: prompt,
+        };
+      } else {
+        const errMsg = rErr.data?.error || rErr.message || String(rErr);
+        return {
+          ok: true,
+          question_id: qid,
+          choice,
+          resumed: false,
+          reason: `Run continue failed to start: ${errMsg}`,
+          continued_from: originRun,
+          instructions: prompt,
+        };
+      }
+    } else {
+      panel.postMessage({ type: 'changed', areas: ['questions', 'tasks', 'runs'] });
+      panel.postMessage({ type: 'question_answered', question_id: qid, choice: String(choice) });
+      if (panel.onTasksUpdated) panel.onTasksUpdated();
+      return {
+        ok: true,
+        question_id: qid,
+        choice,
+        resumed: false,
+        reason,
+      };
+    }
+  },
 };
 
 export const HANDLER_MAP: Record<string, MessageHandler> = {
@@ -1121,6 +1703,17 @@ const INBOX_WRITE_TYPES = new Set([
 
 const TASK_WRITE_TYPES = new Set([
   'deleteTaskAttachment',
+  'setPriority',
+  'setSize',
+  'setDeps',
+  'addChild',
+  'expandTask',
+  'collapseTask',
+  'reopenTask',
+  'setKind',
+  'setLabels',
+  'createMicrotask',
+  'promoteMicrotask',
 ]);
 
 for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
@@ -1133,6 +1726,9 @@ for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
       if (panel.onTasksUpdated) panel.onTasksUpdated();
     } else if (TASK_WRITE_TYPES.has(type)) {
       panel.postMessage({ type: 'changed', areas: ['tasks'] });
+      if (type === 'createMicrotask' && data && typeof data === 'object' && data.id) {
+        panel.postMessage({ type: 'task_created', task_id: data.id });
+      }
       if (panel.onTasksUpdated) panel.onTasksUpdated();
     } else if (type === 'transitionTask') {
       try {

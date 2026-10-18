@@ -129,9 +129,10 @@ async function runDecisionsTreeTests() {
         throw new Error(`CLI questions list failed: ${res.stderr || res.stdout}`);
       }
       const data = JSON.parse(res.stdout);
-      if (status === 'open' && (!data.questions || data.questions.length === 0)) {
-        // If all questions in live repo are answered, supply fixture Q001 for test stability
+      if (status === 'open' && !data.questions?.some((q) => q.id === 'Q001')) {
+        // If Q001 is answered or missing in live repo, supply fixture Q001 for test stability
         data.questions = [
+          ...(data.questions || []),
           {
             id: 'Q001',
             question: 'Which permission policy should headless Claude runs use by default, per mode?',
@@ -204,8 +205,9 @@ async function runDecisionsTreeTests() {
 
   // Initial badge update
   await provider.updateBadge();
-  if (!mockTreeView.badge || mockTreeView.badge.value !== 1) {
-    throw new Error(`Expected treeView.badge to be 1, got: ${JSON.stringify(mockTreeView.badge)}`);
+  const totalQuestions = groupsData.reduce((acc, g) => acc + g.questions.length, 0);
+  if (!mockTreeView.badge || mockTreeView.badge.value !== totalQuestions) {
+    throw new Error(`Expected treeView.badge to be ${totalQuestions}, got: ${JSON.stringify(mockTreeView.badge)}`);
   }
   console.log(`PASS: treeView.badge set to count: ${mockTreeView.badge.value} (${mockTreeView.badge.tooltip})`);
 
