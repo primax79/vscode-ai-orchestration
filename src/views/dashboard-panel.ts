@@ -1895,12 +1895,7 @@ export class DashboardPanel {
       return;
     }
 
-    const eventsDir = path.join(this._boundRoot, '.ai-orchestration', 'events');
-    if (fs.existsSync(eventsDir)) {
-      // Event stream covers changes; ad-hoc watchers replaced
-      return;
-    }
-
+    // File watchers stay on even with the event stream: hand edits and git pulls emit no events.
     // Watch bound folder's tasks/**
     const tasksPattern = new vscode.RelativePattern(this._boundRoot, 'tasks/**');
     const tasksWatcher = vscode.workspace.createFileSystemWatcher(tasksPattern);

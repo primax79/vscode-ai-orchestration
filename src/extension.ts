@@ -317,11 +317,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (bound && fs.existsSync(bound)) {
       eventWatcher.bindFolder(bound);
 
-      const eventsDir = path.join(bound, '.ai-orchestration', 'events');
-      if (fs.existsSync(eventsDir)) {
-        // Event stream covers changes; ad-hoc watchers replaced
-        return;
-      }
+      // File watchers stay on even with the event stream: hand edits and git pulls emit no events.
 
       const tasksWatcher = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(bound, 'tasks/**/*.{md,toml}')
