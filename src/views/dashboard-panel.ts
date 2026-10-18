@@ -570,6 +570,9 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
   setDeps: depsArgs(false),
   previewSetShort: setShortArgs(true),
   setShort: setShortArgs(false),
+  // Names sent by the web frontend (ai-orchestration-ui api.ts)
+  previewSetShortTitle: setShortArgs(true),
+  setShortTitle: setShortArgs(false),
   getRunOptions: (payload, root) => ['run', 'options', ...runTargetArgs(payload), '--workspace', root],
   previewRun: (payload, root) => ['run', 'preview', ...runTargetArgs(payload), '--workspace', root, ...runRequestArgs(payload)],
   startRun: (payload, root) => {
@@ -2864,6 +2867,7 @@ const TASK_WRITE_TYPES = new Set([
   'setKind',
   'setLabels',
   'setShort',
+  'setShortTitle',
   'createMicrotask',
   'promoteMicrotask',
 ]);
