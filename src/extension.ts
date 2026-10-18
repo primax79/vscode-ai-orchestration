@@ -49,6 +49,15 @@ import {
   formatBatchNotification,
   formatStatusBarTooltip,
 } from './question-notifier';
+import {
+  EventWatcher,
+  mapEventToAreas,
+  mapEventsToAreas,
+  shouldNotifyEvent,
+  formatEventNotification,
+  filterNewEvents,
+  getOrchestratorStatus,
+} from './event-watcher';
 
 export {
   HANDLER_MAP,
@@ -92,6 +101,13 @@ export {
   formatQuestionNotification,
   formatBatchNotification,
   formatStatusBarTooltip,
+  EventWatcher,
+  mapEventToAreas,
+  mapEventsToAreas,
+  shouldNotifyEvent,
+  formatEventNotification,
+  filterNewEvents,
+  getOrchestratorStatus,
 };
 
 export function activate(context: vscode.ExtensionContext) {
@@ -111,6 +127,23 @@ export function activate(context: vscode.ExtensionContext) {
   const getBoundRoot = () => workspaceManager.getBoundWorkspaceFolder();
   const questionNotifier = new QuestionNotifier(context, cliClient, getBoundRoot);
   context.subscriptions.push(questionNotifier);
+
+  const eventWatcher = new EventWatcher(context, cliClient, getBoundRoot, (events, areas) => {
+    if (DashboardPanel.currentPanel) {
+      DashboardPanel.currentPanel.notifyAreasChanged(areas);
+    }
+    if (areas.includes('tasks')) {
+      nextUpProvider.refresh();
+      initiativesProvider.refresh();
+      useCasesProvider.refresh();
+      updateStatusBarCount();
+    }
+    if (areas.includes('questions')) {
+      decisionsProvider.refresh();
+      questionNotifier.checkQuestions(false);
+    }
+  });
+  context.subscriptions.push(eventWatcher);
 
   const nextUpProvider = new TaskTreeProvider(cliClient, 'nextUp', getBoundRoot);
   const initiativesProvider = new TaskTreeProvider(cliClient, 'initiatives', getBoundRoot);
@@ -282,6 +315,10 @@ export function activate(context: vscode.ExtensionContext) {
     }
     const bound = workspaceManager.getBoundWorkspaceFolder();
     if (bound && fs.existsSync(bound)) {
+      eventWatcher.bindFolder(bound);
+
+      // File watchers stay on even with the event stream: hand edits and git pulls emit no events.
+
       const tasksWatcher = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(bound, 'tasks/**/*.{md,toml}')
       );
@@ -332,6 +369,10 @@ export function activate(context: vscode.ExtensionContext) {
   updateStatusBarCount();
   decisionsProvider.updateBadge();
   questionNotifier.checkQuestions(true);
+  const initialBound = workspaceManager.getBoundWorkspaceFolder();
+  if (initialBound) {
+    eventWatcher.bindFolder(initialBound);
+  }
   outputChannel.appendLine('AI Orchestration extension activated.');
 }
 

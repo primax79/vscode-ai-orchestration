@@ -172,7 +172,7 @@ const PROCESS_TIMEOUT_MS = 120_000;
 const READ_ONLY_COMMANDS = new Set([
   'tasks list', 'tasks validate', 'tasks graph', 'tasks labels', 'questions list', 'questions show',
   'config show', 'env status', 'run list', 'run show', 'run logs', 'run options',
-  'inbox list', 'inbox show',
+  'inbox list', 'inbox show', 'events tail', 'events stats',
 ]);
 
 export function isReadOnlyCommand(args: string[]): boolean {
@@ -432,5 +432,34 @@ export class CliClient {
     if (expectHash) args.push('--expect-hash', expectHash);
     if (allowGlobalRouting) args.push('--allow-global-routing');
     return this.runJsonCommand(args, workspaceRoot);
+  }
+
+  public async tailEvents(
+    workspaceRoot: string,
+    since?: number,
+    limit?: number,
+    types?: string[],
+    session?: string
+  ): Promise<{ ok: boolean; events: any[]; count: number; first_seq: number | null; last_seq: number | null }> {
+    const args = ['events', 'tail', '--workspace', workspaceRoot];
+    if (since !== undefined) {
+      args.push('--since', String(since));
+    }
+    if (limit !== undefined) {
+      args.push('--limit', String(limit));
+    }
+    if (types && types.length > 0) {
+      for (const t of types) {
+        args.push('--type', t);
+      }
+    }
+    if (session) {
+      args.push('--session', session);
+    }
+    return this.runJsonCommand(args, workspaceRoot);
+  }
+
+  public async getEventsStats(workspaceRoot: string): Promise<any> {
+    return this.runJsonCommand(['events', 'stats', '--workspace', workspaceRoot], workspaceRoot);
   }
 }
