@@ -173,6 +173,7 @@ const READ_ONLY_COMMANDS = new Set([
   'tasks list', 'tasks validate', 'tasks graph', 'tasks labels', 'questions list', 'questions show',
   'config show', 'env status', 'run list', 'run show', 'run logs', 'run options',
   'inbox list', 'inbox show', 'events tail', 'events stats',
+  'sessions list', 'sessions show', 'triggers list', 'triggers status', 'triggers history',
 ]);
 
 export function isReadOnlyCommand(args: string[]): boolean {

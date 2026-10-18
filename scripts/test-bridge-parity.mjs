@@ -88,26 +88,7 @@ function runBridgeParityCheck() {
     'cleanupRun',
   ]);
 
-  const pending126Types = new Set([
-    'getSessions',
-    'getSession',
-    'getRoleHolder',
-    'getTriggers',
-    'getTriggersStatus',
-    'getTriggersHistory',
-    'runTriggersOnce',
-    'previewToggleTrigger',
-    'toggleTrigger',
-    'getProposedActions',
-    'confirmProposedAction',
-    'rejectProposedAction',
-    'getQuestionsAwaitingApplication',
-    'applyQuestion',
-    'getOrchestratorQueue',
-    'getNotifications',
-    'markNotificationRead',
-    'markAllNotificationsRead',
-  ]);
+  const pending126Types = new Set([]);
 
   const missing = [];
   const pending = [];
