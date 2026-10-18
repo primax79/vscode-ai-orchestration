@@ -41,6 +41,9 @@ const {
   checkOriginRunContinuable,
   formatContinuationInstructions,
   isReadOnlyCommand,
+  SET_SHORT_ID_RE,
+  requireSetShortId,
+  setShortArgs,
 } = require('../out/extension.js');
 
 const fail = (m) => { console.error(`FAIL: ${m}`); process.exit(1); };
@@ -68,6 +71,8 @@ const newTypes = [
   'previewSetLabels',
   'setLabels',
   'inboxToMicrotask',
+  'previewSetShort',
+  'setShort',
 ];
 
 for (const t of newTypes) {
@@ -75,7 +80,7 @@ for (const t of newTypes) {
     fail(`HANDLER_MAP missing function for ${t}`);
   }
 }
-console.log('PASS: All 19 new handlers present in HANDLER_MAP');
+console.log('PASS: All new handlers (including previewSetShort/setShort) present in HANDLER_MAP');
 
 // 2. ID validation tests
 // Tree node IDs: ^(T\d{3,}(\.\d+)*|\d{2,}\.\d+(\.\d+)*)$
@@ -383,6 +388,58 @@ if (applyLabelsArgs.includes('--dry-run') || !applyLabelsArgs.includes('--to') |
   fail(`setLabels apply arguments incorrect: ${applyLabelsArgs.join(' ')}`);
 }
 console.log('PASS: previewSetLabels and setLabels argument builder & validation');
+
+// J. previewSetShort & setShort
+try {
+  CLI_COMMAND_MAP.previewSetShort({ id: 'bad-id', short_title: 'short title' }, fakeRoot);
+  fail('previewSetShort must reject bad item id');
+} catch (e) {
+  if (e.status !== 400) fail(`Expected 400 for bad item id, got ${e.status}`);
+}
+try {
+  CLI_COMMAND_MAP.previewSetShort({ id: 'T001' }, fakeRoot);
+  fail('previewSetShort must reject when short_title is missing');
+} catch (e) {
+  if (e.status !== 400 || !e.message.includes('short_title is required')) fail(`previewSetShort error: ${e.message}`);
+}
+try {
+  CLI_COMMAND_MAP.previewSetShort({ id: 'T001', short_title: '   ' }, fakeRoot);
+  fail('previewSetShort must reject empty short_title');
+} catch (e) {
+  if (e.status !== 400 || !e.message.includes('cannot be empty')) fail(`previewSetShort error: ${e.message}`);
+}
+
+const previewShortArgs = CLI_COMMAND_MAP.previewSetShort({ id: 'T001', short_title: 'login form fix' }, fakeRoot);
+if (!previewShortArgs.includes('set-short') || !previewShortArgs.includes('T001') || !previewShortArgs.includes('login form fix') || !previewShortArgs.includes('--dry-run') || !previewShortArgs.includes('--tasks-dir')) {
+  fail(`previewSetShort arguments incorrect: ${previewShortArgs.join(' ')}`);
+}
+
+// preview with expect_plan_hash
+const previewShortHashArgs = CLI_COMMAND_MAP.previewSetShort({ id: 'Q001', short_title: 'deploy decision', expect_plan_hash: 'plan123' }, fakeRoot);
+if (!previewShortHashArgs.includes('--dry-run') || !previewShortHashArgs.includes('--expect-plan-hash') || !previewShortHashArgs.includes('plan123')) {
+  fail(`previewSetShort with plan hash incorrect: ${previewShortHashArgs.join(' ')}`);
+}
+
+// mutating setShort requires expect_plan_hash
+try {
+  CLI_COMMAND_MAP.setShort({ id: 'T001', short_title: 'login form fix' }, fakeRoot);
+  fail('setShort must fail without expect_plan_hash');
+} catch (e) {
+  if (!e.message.includes('expect_plan_hash is required')) fail(`setShort error should mention expect_plan_hash: ${e.message}`);
+}
+
+const applyShortArgs = CLI_COMMAND_MAP.setShort({ id: '01.1.2', short_title: 'v2 release', expect_plan_hash: 'h789' }, fakeRoot);
+if (applyShortArgs.includes('--dry-run') || !applyShortArgs.includes('set-short') || !applyShortArgs.includes('01.1.2') || !applyShortArgs.includes('v2 release') || !applyShortArgs.includes('--expect-plan-hash') || !applyShortArgs.includes('h789')) {
+  fail(`setShort apply arguments incorrect: ${applyShortArgs.join(' ')}`);
+}
+
+// Target ID validation for various item types (T###, 01.1, Q###, UC###, N###, INIT-##)
+for (const validId of ['T001', '01.1', '01.1.2', 'Q001', 'UC001', 'N001', 'INIT-01', '#01']) {
+  if (!SET_SHORT_ID_RE.test(validId)) fail(`SET_SHORT_ID_RE should match ${validId}`);
+  if (requireSetShortId({ id: validId }) !== validId) fail(`requireSetShortId failed for id ${validId}`);
+  if (requireSetShortId({ taskId: validId }) !== validId) fail(`requireSetShortId failed for taskId ${validId}`);
+}
+console.log('PASS: previewSetShort and setShort argument builder & validation');
 
 // 4. CLI client read-only set verification
 if (!isReadOnlyCommand(['tasks', 'labels', '--tasks-dir', fakeTasksDir])) {

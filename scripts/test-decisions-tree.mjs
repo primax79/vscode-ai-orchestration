@@ -227,7 +227,7 @@ async function runDecisionsTreeTests() {
         console.log(`     icon: "${child.iconPath?.id}"`);
         console.log(`     command: ${JSON.stringify(child.command)}`);
 
-        if (child.label.startsWith('Q001 —')) {
+        if (child.label.startsWith('Q001 (') || child.label.startsWith('Q001 —')) {
           foundQ001 = true;
           if (child.description !== 'no task') {
             throw new Error(`Expected description "no task", got "${child.description}"`);

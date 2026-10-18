@@ -2,7 +2,12 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CliClient, isReadOnlyCommand } from './cli-client';
-import { TaskTreeProvider, TaskTreeItem } from './views/task-tree-provider';
+import {
+  TaskTreeProvider,
+  TaskTreeItem,
+  InitiativeTreeItem,
+  DecisionTreeItem,
+} from './views/task-tree-provider';
 import {
   DecisionsTreeProvider,
   DecisionGroupTreeItem,
@@ -50,7 +55,11 @@ import {
   readPartialAssistantMessages,
   getTurnSortKey,
   compareTurns,
+  setShortArgs,
+  SET_SHORT_ID_RE,
+  requireSetShortId,
 } from './views/dashboard-panel';
+import { shortTitle, deriveShortTitle } from './short-title';
 import { WorkspaceManager } from './workspace-manager';
 import {
   QuestionNotifier,
@@ -110,6 +119,10 @@ export {
   DashboardPanel,
   CliClient,
   isReadOnlyCommand,
+  TaskTreeProvider,
+  TaskTreeItem,
+  InitiativeTreeItem,
+  DecisionTreeItem,
   DecisionsTreeProvider,
   DecisionGroupTreeItem,
   DecisionQuestionTreeItem,
@@ -128,6 +141,11 @@ export {
   formatEventNotification,
   filterNewEvents,
   getOrchestratorStatus,
+  shortTitle,
+  deriveShortTitle,
+  setShortArgs,
+  SET_SHORT_ID_RE,
+  requireSetShortId,
 };
 
 export function activate(context: vscode.ExtensionContext) {
@@ -315,7 +333,9 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('aiOrchestration.copyHandoff', (item?: TaskTreeItem) => {
       if (item && item.task.handoff) {
         vscode.env.clipboard.writeText(item.task.handoff);
-        vscode.window.showInformationMessage(`Copied handoff prompt for ${item.task.id}`);
+        const st = shortTitle(item.task);
+        const label = st ? `${item.task.id} (${st})` : item.task.id;
+        vscode.window.showInformationMessage(`Copied handoff prompt for ${label}`);
       }
     }),
 

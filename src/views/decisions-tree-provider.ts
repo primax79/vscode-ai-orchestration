@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CliClient, QuestionItem, TaskItem } from '../cli-client';
+import { shortTitle } from '../short-title';
 
 export interface DecisionGroupData {
   groupKey: string;
@@ -110,7 +111,8 @@ export class DecisionGroupTreeItem extends vscode.TreeItem {
     public readonly taskTitle?: string
   ) {
     const isNoTask = groupKey === 'No task';
-    const label = isNoTask ? 'No task' : `Task ${groupKey}`;
+    const st = taskTitle ? shortTitle({ title: taskTitle }) : '';
+    const label = isNoTask ? 'No task' : (st ? `Task ${groupKey} (${st})` : `Task ${groupKey}`);
     super(label, vscode.TreeItemCollapsibleState.Expanded);
 
     this.id = `decision-group-${groupKey}`;
@@ -138,7 +140,9 @@ export class DecisionQuestionTreeItem extends vscode.TreeItem {
   ) {
     const shortQuestion = question.question || question.title || '';
     const cleanQuestion = shortQuestion.trim().replace(/\r?\n/g, ' ');
-    super(`${question.id} — ${cleanQuestion}`, vscode.TreeItemCollapsibleState.None);
+    const st = shortTitle(question);
+    const label = st ? `${question.id} (${st})` : question.id;
+    super(label, vscode.TreeItemCollapsibleState.None);
 
     this.id = `decision-question-${question.id}`;
     this.contextValue = 'questionItem';
@@ -147,7 +151,7 @@ export class DecisionQuestionTreeItem extends vscode.TreeItem {
     const blockedIds = getBlockedTaskIds(question);
     this.description = blockedIds.length > 0 ? blockedIds.join(', ') : 'no task';
 
-    // Tooltip: recommended option + asked-by + date
+    // Tooltip: full question + recommended option + asked-by + date
     const recOpt = question.options?.find((o: any) => o.label === question.recommended);
     let recStr = question.recommended || '-';
     if (recOpt) {
@@ -155,7 +159,7 @@ export class DecisionQuestionTreeItem extends vscode.TreeItem {
     }
     const askedBy = question.asked_by || (question as any).headers?.['asked-by'] || '-';
     const askedDate = question.asked || (question as any).headers?.['asked'] || '-';
-    this.tooltip = `Recommended: ${recStr}\nAsked by: ${askedBy}\nDate: ${askedDate}`;
+    this.tooltip = `${question.id}: ${cleanQuestion}\nRecommended: ${recStr}\nAsked by: ${askedBy}\nDate: ${askedDate}`;
 
     // Icon: question
     this.iconPath = new vscode.ThemeIcon('question');

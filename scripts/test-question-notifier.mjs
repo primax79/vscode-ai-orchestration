@@ -169,7 +169,7 @@ async function runQuestionNotifierTests() {
     throw new Error('Expected newNotifiedSet to include Q003');
   }
   const toastMsg = formatQuestionNotification(resultSingleNew.toNotify[0]);
-  if (toastMsg !== 'New decision Q003: Allow external network access?') {
+  if (toastMsg !== 'Q003 (Allow external network access) needs a decision') {
     throw new Error(`Unexpected single notification format: "${toastMsg}"`);
   }
   console.log(`PASS: Test 2 (single new id toast: "${toastMsg}") succeeded.`);

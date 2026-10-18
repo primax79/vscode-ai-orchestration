@@ -356,7 +356,7 @@ await watcher.pollNewEvents();
 
 // Notified question should be stored in workspaceState under both question and seq keys
 assert.strictEqual(notificationsShown.length, 1);
-assert.strictEqual(notificationsShown[0].msg, 'New decision Q001: Deploy to pre or prod?');
+assert.strictEqual(notificationsShown[0].msg, 'Q001 (Deploy to pre) needs a decision');
 const storedQuestions = mockState.get(`aiOrchestration.notifiedQuestions:${wsDir}`);
 assert.ok(storedQuestions.includes('Q001'));
 const storedSeqs = mockState.get(`aiOrchestration.notifiedEventSeqs:${wsDir}`);
