@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CliClient, TaskItem, InitiativeItem, TaskListResult } from '../cli-client';
+import { shortTitle } from '../short-title';
 import {
   DecisionsTreeProvider,
   DecisionGroupTreeItem,
@@ -14,8 +15,10 @@ export class TaskTreeItem extends vscode.TreeItem {
     public readonly task: TaskItem,
     public readonly workspaceRoot: string
   ) {
+    const st = shortTitle(task);
+    const label = st ? `${task.id} (${st})` : task.id;
     super(
-      `[${task.priority || 'P1'}] ${task.id}: ${task.title}`,
+      label,
       vscode.TreeItemCollapsibleState.None
     );
 
@@ -29,7 +32,7 @@ export class TaskTreeItem extends vscode.TreeItem {
     );
     this.tooltip.isTrusted = true;
 
-    this.description = `${task.state} (${task.executor || 'self'})`;
+    this.description = `${task.title} • ${task.state} (${task.executor || 'self'})`;
     this.contextValue = 'taskItem';
 
     // Icons matching priority and state
@@ -65,15 +68,18 @@ export class InitiativeTreeItem extends vscode.TreeItem {
     public readonly workspaceRoot: string
   ) {
     const hasSubtasks = (initiative.tasks || []).length > 0;
+    const st = shortTitle(initiative);
+    const idStr = String(initiative.id).startsWith('#') ? initiative.id : `#${initiative.id}`;
+    const label = st ? `${idStr} (${st})` : idStr;
     super(
-      `#${initiative.id}: ${initiative.title}`,
+      label,
       hasSubtasks
         ? vscode.TreeItemCollapsibleState.Collapsed
         : vscode.TreeItemCollapsibleState.None
     );
 
     const status = initiative.status || (initiative.location === 'merged' ? 'done' : 'active');
-    this.description = `${status} (${(initiative.tasks || []).length} tasks)`;
+    this.description = `${initiative.title} • ${status} (${(initiative.tasks || []).length} tasks)`;
 
     if (status === 'done') {
       this.iconPath = new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('charts.green'));
@@ -101,14 +107,16 @@ export class DecisionTreeItem extends vscode.TreeItem {
     public readonly task: TaskItem,
     public readonly workspaceRoot: string
   ) {
+    const st = shortTitle(task);
+    const label = st ? `${task.id} (${st})` : task.id;
     super(
-      `[Decision] ${task.id}: ${task.decider || task.title}`,
+      label,
       vscode.TreeItemCollapsibleState.None
     );
 
-    this.description = `Waiting on: ${task.decider || 'owner'}`;
+    this.description = `${task.title} • Waiting on: ${task.decider || 'owner'}`;
     this.iconPath = new vscode.ThemeIcon('question', new vscode.ThemeColor('charts.yellow'));
-    this.tooltip = `Task ${task.id} is waiting on decision:\n${task.decider}`;
+    this.tooltip = `Task ${task.id}: ${task.title}\nWaiting on decision: ${task.decider}`;
 
     if (task.file_path && fs.existsSync(task.file_path)) {
       this.command = {
@@ -176,11 +184,14 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
       if (element instanceof InitiativeTreeItem) {
         const init = element.initiative;
         const subtasks = (init.tasks || []).map((st: any) => {
+          const sTitle = shortTitle(st);
+          const label = sTitle ? `${st.id} (${sTitle})` : st.id;
           const item = new vscode.TreeItem(
-            `[${st.state || init.status || 'open'}] ${st.id}: ${st.title}`,
+            label,
             vscode.TreeItemCollapsibleState.None
           );
-          item.description = st.state || init.status;
+          item.description = `${st.title} (${st.state || init.status || 'open'})`;
+          item.tooltip = `${st.id}: ${st.title}\nState: ${st.state || init.status || 'open'}`;
           item.iconPath = st.state === 'done' || init.status === 'done'
             ? new vscode.ThemeIcon('check', new vscode.ThemeColor('charts.green'))
             : st.state === 'verified'
@@ -235,11 +246,13 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
           return [empty];
         }
         return ucs.map((u: any) => {
+          const st = shortTitle(u);
+          const label = st ? `${u.id} (${st})` : u.id;
           const item = new vscode.TreeItem(
-            `[${u.id}] ${u.title}`,
+            label,
             vscode.TreeItemCollapsibleState.None
           );
-          item.description = `${u.status} (${u.actor})`;
+          item.description = `${u.title} • ${u.status} (${u.actor})`;
           item.tooltip = `${u.id}: ${u.title}\nActor: ${u.actor}\nStatus: ${u.status}\nLast verdict: ${u.last_verdict || 'untested'}`;
           if (u.last_verdict === 'pass') {
             item.iconPath = new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('charts.green'));

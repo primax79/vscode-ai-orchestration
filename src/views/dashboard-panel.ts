@@ -178,6 +178,27 @@ export const requireMicrotaskId = (payload: any): string => {
   return id;
 };
 
+export const SET_SHORT_ID_RE = /^(T\d{3,}(\.\d+)*|\d{2,}\.\d+(\.\d+)*|Q\d{3,}|UC\d{3,}|N\d{3,}|INIT-\d+|#\d+)$/;
+export const requireSetShortId = (payload: any): string => {
+  const id = String(
+    payload?.id ||
+    payload?.taskId ||
+    payload?.task_id ||
+    payload?.node_id ||
+    payload?.questionId ||
+    payload?.question_id ||
+    payload?.noteId ||
+    payload?.note_id ||
+    ''
+  );
+  if (!SET_SHORT_ID_RE.test(id)) {
+    const err: any = new Error(`Invalid item ID ${JSON.stringify(id)}`);
+    err.status = 400;
+    throw err;
+  }
+  return id;
+};
+
 export const PROPOSAL_ACTION_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 export const TURN_ID_RE = /^[A-Za-z0-9._-]+$/;
@@ -354,7 +375,7 @@ const mutationTail = (payload: any, preview: boolean): string[] => {
   return tail;
 };
 const planMutationTail = (payload: any, preview: boolean): string[] => {
-  const h = payload?.expect_plan_hash || payload?.expect_hash || payload?.plan_hash;
+  const h = payload?.expect_plan_hash || payload?.expect_hash || payload?.plan_hash || payload?.expect_task_hash;
   if (!preview && !h) {
     const err: any = new Error('expect_plan_hash is required');
     err.status = 400;
@@ -386,6 +407,24 @@ const depsArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
   if (remove.length) args.push('--remove', ...remove);
   if (to) args.push('--to', ...to);
   return [...args, ...mutationTail(payload, preview)];
+};
+
+export const setShortArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
+  const targetId = requireSetShortId(payload);
+  const words = payload?.short_title ?? payload?.shortTitle ?? payload?.short ?? payload?.words;
+  if (words === undefined || words === null) {
+    const err: any = new Error('short_title is required');
+    err.status = 400;
+    throw err;
+  }
+  const cleanWords = String(words).trim();
+  if (!cleanWords) {
+    const err: any = new Error('short_title cannot be empty');
+    err.status = 400;
+    throw err;
+  }
+  const args = ['tasks', 'set-short', targetId, cleanWords, '--tasks-dir', path.join(root, 'tasks')];
+  return [...args, ...planMutationTail(payload, preview)];
 };
 
 const addChildArgs = (preview: boolean): CliArgBuilder => (payload, root) => {
@@ -529,6 +568,8 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
   setSize: sizeArgs(false),
   previewSetDeps: depsArgs(true),
   setDeps: depsArgs(false),
+  previewSetShort: setShortArgs(true),
+  setShort: setShortArgs(false),
   getRunOptions: (payload, root) => ['run', 'options', ...runTargetArgs(payload), '--workspace', root],
   previewRun: (payload, root) => ['run', 'preview', ...runTargetArgs(payload), '--workspace', root, ...runRequestArgs(payload)],
   startRun: (payload, root) => {
@@ -2822,6 +2863,7 @@ const TASK_WRITE_TYPES = new Set([
   'reopenTask',
   'setKind',
   'setLabels',
+  'setShort',
   'createMicrotask',
   'promoteMicrotask',
 ]);
@@ -2855,6 +2897,7 @@ for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
       type === 'setPriority' ||
       type === 'setSize' ||
       type === 'setDeps' ||
+      type === 'setShort' ||
       type === 'startRun' ||
       type === 'continueRun' ||
       type === 'cancelRun' ||

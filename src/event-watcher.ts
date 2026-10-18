@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CliClient } from './cli-client';
+import { shortTitle } from './short-title';
+import { formatQuestionNotification } from './question-notifier';
 
 export interface OrchestrationEventLike {
   seq: number;
@@ -152,16 +154,18 @@ export function formatEventNotification(event: OrchestrationEventLike): EventNot
     const runId = subject || payload.run_id || '';
     const status = payload.status || 'finished';
     const verdict = payload.verdict;
+    const taskTitle = payload.short_title || payload.task_short_title || (payload.task ? shortTitle({ title: payload.task }) : '');
+    const runLabel = taskTitle ? `Run ${runId} (${taskTitle})` : `Run ${runId}`;
     if (status === 'failed') {
       return {
-        message: `Run ${runId} failed`,
+        message: `${runLabel} failed`,
         actionTitle: 'Open Dashboard',
         actionCommand: 'aiOrchestration.openDashboard',
       };
     }
     const verdictText = verdict ? ` (verdict: ${verdict})` : '';
     return {
-      message: `Run ${runId} finished: ${status}${verdictText}`,
+      message: `${runLabel} finished: ${status}${verdictText}`,
       actionTitle: 'Open Dashboard',
       actionCommand: 'aiOrchestration.openDashboard',
     };
@@ -170,8 +174,10 @@ export function formatEventNotification(event: OrchestrationEventLike): EventNot
   if (t === 'run.failed') {
     const runId = subject || payload.run_id || '';
     const err = payload.error || payload.reason || '';
+    const taskTitle = payload.short_title || payload.task_short_title || (payload.task ? shortTitle({ title: payload.task }) : '');
+    const runLabel = taskTitle ? `Run ${runId} (${taskTitle})` : `Run ${runId}`;
     return {
-      message: `Run ${runId} failed${err ? `: ${err}` : ''}`,
+      message: `${runLabel} failed${err ? `: ${err}` : ''}`,
       actionTitle: 'Open Dashboard',
       actionCommand: 'aiOrchestration.openDashboard',
     };
@@ -432,8 +438,13 @@ export class EventWatcher implements vscode.Disposable {
             notifiedSeqsSet.add(ev.seq);
 
             if (notifyQuestionsEnabled) {
-              const qText = (ev.payload?.question || ev.data?.question || '').trim().replace(/\r?\n/g, ' ');
-              const msg = `New decision ${qId}: ${qText}`;
+              const qObj = {
+                id: qId,
+                short_title: ev.payload?.short_title || ev.data?.short_title,
+                question: ev.payload?.question || ev.data?.question,
+                title: ev.payload?.title || ev.data?.title,
+              };
+              const msg = formatQuestionNotification(qObj);
               vscode.window.showInformationMessage(msg, 'Open', 'Later').then((action) => {
                 if (action === 'Open') {
                   vscode.commands.executeCommand('aiOrchestration.openDashboard', {

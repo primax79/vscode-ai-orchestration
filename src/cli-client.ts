@@ -7,6 +7,8 @@ export interface TaskItem {
   kind: 'emergent' | 'initiative_task';
   id: string;
   title: string;
+  short_title?: string;
+  short_title_source?: string;
   category: string;
   priority: 'P0' | 'P1' | 'P2' | 'P3';
   priority_reason?: string;
@@ -27,6 +29,8 @@ export interface TaskItem {
 export interface InitiativeItem {
   id: string;
   title: string;
+  short_title?: string;
+  short_title_source?: string;
   slug: string;
   plan_path: string;
   tasks_count: number;
@@ -57,6 +61,8 @@ export interface QuestionAnswer {
 export interface QuestionItem {
   id: string;
   question: string;
+  short_title?: string;
+  short_title_source?: string;
   status: 'open' | 'answered' | 'withdrawn' | string;
   blocks: string;
   blocks_parsed?: [string, string | null][];

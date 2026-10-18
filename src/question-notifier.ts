@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CliClient } from './cli-client';
+import { shortTitle } from './short-title';
 
 export interface QuestionItemLike {
   id: string;
@@ -102,15 +103,21 @@ export function diffQuestions<T extends QuestionItemLike = QuestionItemLike>(
 }
 
 export function formatQuestionNotification(q: QuestionItemLike): string {
-  const shortQuestion = (q.question || q.title || '').trim().replace(/\r?\n/g, ' ');
-  return `New decision ${q.id}: ${shortQuestion}`;
+  const st = shortTitle(q);
+  return st ? `${q.id} (${st}) needs a decision` : `${q.id} needs a decision`;
 }
 
 export function formatBatchNotification(count: number): string {
   return `${count} new decisions waiting`;
 }
 
-export function formatStatusBarTooltip(count: number): string {
+export function formatStatusBarTooltip(count: number, singleQuestion?: QuestionItemLike): string {
+  if (count === 1 && singleQuestion) {
+    const st = shortTitle(singleQuestion);
+    if (st) {
+      return `${singleQuestion.id} (${st}) needs a decision — click to open`;
+    }
+  }
   return `${count} open decision${count === 1 ? '' : 's'} — click to open`;
 }
 
@@ -216,7 +223,8 @@ export class QuestionNotifier implements vscode.Disposable {
       );
 
       // Update status bar badge & warning background
-      this.updateStatusBar(result.count);
+      const singleQ = questions.length === 1 ? questions[0] : undefined;
+      this.updateStatusBar(result.count, singleQ);
 
       // Trigger VS Code notification toasts if enabled
       if (result.toNotify.length > 0) {
@@ -260,9 +268,9 @@ export class QuestionNotifier implements vscode.Disposable {
     }
   }
 
-  public updateStatusBar(count: number): void {
+  public updateStatusBar(count: number, singleQuestion?: QuestionItemLike): void {
     this.statusBarItem.text = `$(question) ${count}`;
-    this.statusBarItem.tooltip = formatStatusBarTooltip(count);
+    this.statusBarItem.tooltip = formatStatusBarTooltip(count, singleQuestion);
     if (count > 0) {
       this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else {
