@@ -178,6 +178,141 @@ export const requireMicrotaskId = (payload: any): string => {
   return id;
 };
 
+export const PROPOSAL_ACTION_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+export const TURN_ID_RE = /^[A-Za-z0-9._-]+$/;
+export function validateTurnId(id: string): string {
+  if (!id || typeof id !== 'string') {
+    const err: any = new Error('turn_id is required');
+    err.status = 400;
+    err.data = { error: 'turn_id is required' };
+    throw err;
+  }
+  const cleanId = id.endsWith('.json') ? id.slice(0, -5) : id;
+  const trimmed = cleanId.trim();
+  if (
+    !trimmed ||
+    trimmed.includes('..') ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\') ||
+    trimmed.includes('\0') ||
+    !TURN_ID_RE.test(trimmed)
+  ) {
+    const err: any = new Error(`Invalid turn ID ${JSON.stringify(id)}`);
+    err.status = 400;
+    err.data = { error: 'invalid_turn_id', message: `Invalid turn ID ${JSON.stringify(id)}` };
+    throw err;
+  }
+  return trimmed;
+}
+
+export function getRotateAfterTokens(root: string): number {
+  for (const filename of ['.ai-orchestration.local.toml', 'orchestration.toml']) {
+    const p = path.join(root, filename);
+    if (fs.existsSync(p)) {
+      try {
+        const content = fs.readFileSync(p, 'utf-8');
+        const match = content.match(/rotate_after_tokens\s*=\s*(\d+)/);
+        if (match) {
+          const val = parseInt(match[1], 10);
+          if (!isNaN(val)) return val;
+        }
+      } catch {}
+    }
+  }
+  return 150000;
+}
+
+export function readPartialAssistantMessages(turnDir: string): string[] {
+  let chunks: string[] = [];
+  if (fs.existsSync(turnDir) && fs.statSync(turnDir).isDirectory()) {
+    const files = fs.readdirSync(turnDir);
+    chunks = files
+      .filter((f) => f.startsWith('events.') && f.endsWith('.jsonl'))
+      .sort()
+      .map((f) => path.join(turnDir, f));
+    if (chunks.length === 0 && files.includes('events.jsonl')) {
+      chunks = [path.join(turnDir, 'events.jsonl')];
+    }
+  }
+  const messages: string[] = [];
+  const kiloMsgIndex = new Map<string, number>();
+
+  for (const chunk of chunks) {
+    try {
+      const text = fs.readFileSync(chunk, 'utf-8');
+      const lines = text.split(/\r?\n/);
+      for (let line of lines) {
+        line = line.trim();
+        if (!line.startsWith('{')) continue;
+        let obj: any;
+        try {
+          obj = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!obj || typeof obj !== 'object') continue;
+
+        const typ = obj.type;
+        const part = obj.part;
+        if (typ === 'text' && part && typeof part === 'object' && part.type === 'text') {
+          const t = part.text;
+          if (typeof t === 'string') {
+            const mid = part.messageID;
+            if (typeof mid === 'string' && kiloMsgIndex.has(mid)) {
+              const idx = kiloMsgIndex.get(mid)!;
+              messages[idx] = messages[idx] ? `${messages[idx]}\n${t}` : t;
+            } else {
+              if (typeof mid === 'string') {
+                kiloMsgIndex.set(mid, messages.length);
+              }
+              messages.push(t);
+            }
+          }
+        } else if (typ === 'item.completed' && obj.item && typeof obj.item === 'object') {
+          const it = obj.item;
+          if (it.type === 'agent_message' && typeof it.text === 'string') {
+            messages.push(it.text);
+          }
+        } else if (obj.role === 'assistant') {
+          const content = obj.content || obj.text;
+          if (typeof content === 'string' && content.trim()) {
+            messages.push(content);
+          }
+        }
+      }
+    } catch {}
+  }
+  return messages;
+}
+
+export function getTurnSortKey(t: any): [string, number] {
+  const ts = String(
+    t.created_at ||
+    t.queued_at ||
+    t.started_at ||
+    t.ended_at ||
+    ''
+  ).trim();
+
+  let seq = t.turn_seq;
+  if (typeof seq !== 'number') {
+    const tid = String(t.turn_id ?? '0');
+    const firstPart = tid.split('-')[0];
+    const parsed = parseInt(firstPart, 10);
+    seq = !isNaN(parsed) && /^\d+$/.test(firstPart) ? parsed : 0;
+  }
+  return [ts, seq];
+}
+
+export function compareTurns(a: any, b: any): number {
+  const [tsA, seqA] = getTurnSortKey(a);
+  const [tsB, seqB] = getTurnSortKey(b);
+  if (tsA < tsB) return -1;
+  if (tsA > tsB) return 1;
+  return seqA - seqB;
+}
+
 export const VALID_KINDS = new Set(['bug', 'chore', 'docs', 'feature', 'fix', 'investigation']);
 export const VALID_PRIORITIES = new Set(['P0', 'P1', 'P2', 'P3']);
 export const VALID_SIZES = new Set(['XS', 'S', 'M', 'L', 'XL']);
@@ -845,6 +980,37 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     const args = ['triggers', 'history', '--workspace', root];
     if (payload?.rule) args.push('--rule', String(payload.rule));
     if (payload?.limit !== undefined && payload?.limit !== null) args.push('--limit', String(payload.limit));
+    return args;
+  },
+  previewOrchestratorReassign: (payload, root) => {
+    const tool = payload?.tool;
+    if (!tool || !String(tool).trim()) {
+      const err: any = new Error('tool is required');
+      err.status = 400;
+      err.data = { error: 'tool is required' };
+      throw err;
+    }
+    const args = ['orchestrator', 'reassign', '--tool', String(tool).trim(), '--dry-run', '--workspace', root];
+    if (payload?.model) args.push('--model', String(payload.model));
+    const scope = payload?.scope || 'project';
+    args.push('--scope', String(scope));
+    if (payload?.no_handoff || payload?.noHandoff) args.push('--no-handoff');
+    if (payload?.timeout) args.push('--timeout', String(payload.timeout));
+    return args;
+  },
+  previewSetup: (payload, root) => {
+    const scope = payload?.scope || 'project-local';
+    const args = ['setup', '--plan', '--scope', String(scope), '--workspace', root];
+    const orch = payload?.orchestrator;
+    if (orch) args.push('--orchestrator', String(orch));
+    const executor = payload?.executor;
+    if (executor) args.push('--executor', String(executor));
+    const orchModel = payload?.orchestrator_model || payload?.orchestratorModel;
+    if (orchModel) args.push('--orchestrator-model', String(orchModel));
+    const execModel = payload?.executor_model || payload?.executorModel;
+    if (execModel) args.push('--executor-model', String(execModel));
+    const vmode = payload?.verification_mode || payload?.verificationMode;
+    if (vmode) args.push('--verification-mode', String(vmode));
     return args;
   },
 };
@@ -1984,27 +2150,139 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
   },
   confirmProposedAction: async (panel, payload, root) => {
     const actionId = String(payload?.actionId || payload?.action_id || payload?.id || '');
-    const err: any = new Error('Engine does not provide CLI commands for confirming proposed actions; listing only is currently supported.');
-    err.status = 400;
-    err.data = {
-      ok: false,
-      action_id: actionId,
-      error: 'not-implemented',
-      message: 'Engine does not provide CLI commands for confirming proposed actions; listing only is currently supported.',
-    };
-    throw err;
+    const cleanId = actionId.endsWith('.json') ? actionId.slice(0, -5) : actionId;
+    if (!cleanId || !PROPOSAL_ACTION_ID_RE.test(cleanId)) {
+      const err: any = new Error(`Action ID '${actionId}' is invalid (must be alphanumeric/hyphens/underscores without path separators).`);
+      err.status = 400;
+      err.data = {
+        ok: false,
+        action_id: actionId,
+        error: 'invalid_action_id',
+        message: `Action ID '${actionId}' is invalid (must be alphanumeric/hyphens/underscores without path separators).`,
+      };
+      throw err;
+    }
+
+    const expectHash = payload?.expect_hash || payload?.expectHash;
+    if (!expectHash || typeof expectHash !== 'string' || !expectHash.trim()) {
+      const err: any = new Error("Field 'expect_hash' is required and must be non-empty.");
+      err.status = 400;
+      err.data = {
+        ok: false,
+        action_id: cleanId,
+        error: 'missing_expect_hash',
+        message: "Field 'expect_hash' is required and must be non-empty.",
+      };
+      throw err;
+    }
+
+    const cmd = [
+      'triggers',
+      'confirm',
+      cleanId,
+      '--expect-hash',
+      expectHash.trim(),
+      '--actor',
+      'vscode',
+      '--workspace',
+      root,
+    ];
+
+    try {
+      const data = await panel.cliClient.runJsonCommand<any>(cmd, root);
+      const areas = ['triggers', 'events'];
+      if (data && typeof data === 'object' && data.run_id) {
+        areas.push('runs');
+      }
+      panel.postMessage({ type: 'changed', areas });
+      return data;
+    } catch (e: any) {
+      const errData = e.data || {};
+      const errType = typeof errData === 'object' ? errData.error : '';
+      let status = e.status;
+      if (errType === 'proposal_not_found') {
+        status = 404;
+      } else if (errType === 'not_pending' || errType === 'hash_mismatch' || errType === 'plan_hash_mismatch') {
+        status = 409;
+      } else if (errType === 'disallowed_command') {
+        status = 400;
+      } else if (errType === 'preview_failed' || errType === 'start_failed') {
+        status = 502;
+      }
+      e.status = status;
+      throw e;
+    }
   },
   rejectProposedAction: async (panel, payload, root) => {
     const actionId = String(payload?.actionId || payload?.action_id || payload?.id || '');
-    const err: any = new Error('Engine does not provide CLI commands for rejecting proposed actions; listing only is currently supported.');
-    err.status = 400;
-    err.data = {
-      ok: false,
-      action_id: actionId,
-      error: 'not-implemented',
-      message: 'Engine does not provide CLI commands for rejecting proposed actions; listing only is currently supported.',
-    };
-    throw err;
+    const cleanId = actionId.endsWith('.json') ? actionId.slice(0, -5) : actionId;
+    if (!cleanId || !PROPOSAL_ACTION_ID_RE.test(cleanId)) {
+      const err: any = new Error(`Action ID '${actionId}' is invalid (must be alphanumeric/hyphens/underscores without path separators).`);
+      err.status = 400;
+      err.data = {
+        ok: false,
+        action_id: actionId,
+        error: 'invalid_action_id',
+        message: `Action ID '${actionId}' is invalid (must be alphanumeric/hyphens/underscores without path separators).`,
+      };
+      throw err;
+    }
+
+    const reason = payload?.reason;
+    if (!reason || typeof reason !== 'string' || !reason.trim()) {
+      const err: any = new Error("Field 'reason' is required and must be non-empty.");
+      err.status = 400;
+      err.data = {
+        ok: false,
+        action_id: cleanId,
+        error: 'missing_reason',
+        message: "Field 'reason' is required and must be non-empty.",
+      };
+      throw err;
+    }
+
+    if (reason.trim().length > 1000) {
+      const err: any = new Error('Reason exceeds maximum length of 1000 characters.');
+      err.status = 400;
+      err.data = {
+        ok: false,
+        action_id: cleanId,
+        error: 'reason_too_long',
+        message: 'Reason exceeds maximum length of 1000 characters.',
+      };
+      throw err;
+    }
+
+    const cmd = [
+      'triggers',
+      'reject',
+      cleanId,
+      '--reason',
+      reason.trim(),
+      '--actor',
+      'vscode',
+      '--workspace',
+      root,
+    ];
+
+    try {
+      const data = await panel.cliClient.runJsonCommand<any>(cmd, root);
+      panel.postMessage({ type: 'changed', areas: ['triggers', 'events'] });
+      return data;
+    } catch (e: any) {
+      const errData = e.data || {};
+      const errType = typeof errData === 'object' ? errData.error : '';
+      let status = e.status;
+      if (errType === 'proposal_not_found') {
+        status = 404;
+      } else if (errType === 'not_pending' || errType === 'hash_mismatch') {
+        status = 409;
+      } else if (errType === 'missing_reason' || errType === 'disallowed_command') {
+        status = 400;
+      }
+      e.status = status;
+      throw e;
+    }
   },
   getQuestionsAwaitingApplication: async (panel, payload, root) => {
     const tasksDir = path.join(root, 'tasks');
@@ -2158,6 +2436,363 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
     }
     panel.postMessage({ type: 'changed', areas: ['notifications'] });
     return { ok: true, marked_all: true };
+  },
+  getOrchestratorStatus: async (panel, payload, root) => {
+    const data = await panel.cliClient.runJsonCommand<any>(
+      ['orchestrator', 'status', '--workspace', root],
+      root
+    );
+    if (data && typeof data === 'object') {
+      if (data.rotate_after_tokens === undefined) {
+        data.rotate_after_tokens = getRotateAfterTokens(root);
+      }
+      if (data.ok === undefined) {
+        data.ok = true;
+      }
+    }
+    return data;
+  },
+  postOrchestratorChat: async (panel, payload, root) => {
+    const message = payload?.message;
+    if (message === undefined || message === null || !String(message).trim()) {
+      const err: any = new Error('message is required and must not be empty');
+      err.status = 400;
+      err.data = { error: 'message is required and must not be empty' };
+      throw err;
+    }
+    const turnType = String(payload?.type || 'owner_chat');
+    const priority = String(payload?.priority || 'owner');
+    const args = [
+      'orchestrator',
+      'enqueue',
+      '--message',
+      String(message).trim(),
+      '--type',
+      turnType,
+      '--priority',
+      priority,
+      '--workspace',
+      root,
+    ];
+    if (payload?.policy) {
+      args.push('--policy', String(payload.policy));
+    }
+    const data = await panel.cliClient.runJsonCommand<any>(args, root);
+    const turnRec = data && typeof data === 'object' ? data.turn ?? null : null;
+    panel.postMessage({ type: 'turn_queued', turn: turnRec });
+    panel.postMessage({ type: 'changed', areas: ['orchestrator', 'queue', 'events'] });
+    return data && typeof data === 'object' ? data : { ok: true, result: data };
+  },
+  getOrchestratorConversation: async (panel, payload, root) => {
+    const limit = payload?.limit !== undefined && payload?.limit !== null ? parseInt(String(payload.limit), 10) : 50;
+    const offset = payload?.offset !== undefined && payload?.offset !== null ? parseInt(String(payload.offset), 10) : 0;
+    const safeLimit = isNaN(limit) ? 50 : limit;
+    const safeOffset = isNaN(offset) ? 0 : offset;
+    const order = String(payload?.order || 'asc').toLowerCase();
+
+    const tDir = path.join(root, '.ai-orchestration', 'orchestrator', 'turns');
+    const qDir = path.join(root, '.ai-orchestration', 'orchestrator', 'queue');
+
+    const turnsById = new Map<string, any>();
+
+    // 1. Read archived/completed turns
+    if (fs.existsSync(tDir) && fs.statSync(tDir).isDirectory()) {
+      const dirs = fs.readdirSync(tDir);
+      for (const d of dirs) {
+        if (d.startsWith('.')) continue;
+        const dPath = path.join(tDir, d);
+        if (!fs.existsSync(dPath) || !fs.statSync(dPath).isDirectory()) continue;
+
+        const tJson = path.join(dPath, 'turn.json');
+        if (fs.existsSync(tJson) && fs.statSync(tJson).isFile()) {
+          try {
+            const rec = JSON.parse(fs.readFileSync(tJson, 'utf-8'));
+            const turnId = String(rec.turn_id || d);
+            let createdTs = rec.created_at || rec.queued_at || rec.started_at || rec.ended_at;
+            if (!createdTs) {
+              try {
+                createdTs = fs.statSync(tJson).mtime.toISOString();
+              } catch {
+                createdTs = '';
+              }
+            }
+            if (!rec.created_at) rec.created_at = createdTs;
+            let assistantMsgs = rec.assistant_messages;
+            if (!assistantMsgs && rec.state === 'running') {
+              assistantMsgs = readPartialAssistantMessages(dPath);
+              rec.assistant_messages = assistantMsgs;
+            }
+            if (rec.output === undefined) {
+              rec.output = Array.isArray(assistantMsgs) ? assistantMsgs.join('\n\n') : String(assistantMsgs || '');
+            }
+            turnsById.set(turnId, rec);
+          } catch {}
+        } else {
+          try {
+            const pFile = path.join(dPath, 'prompt.txt');
+            const promptText = fs.existsSync(pFile) && fs.statSync(pFile).isFile() ? fs.readFileSync(pFile, 'utf-8') : '';
+            const inFile = path.join(dPath, 'input.json');
+            const inData = fs.existsSync(inFile) && fs.statSync(inFile).isFile() ? JSON.parse(fs.readFileSync(inFile, 'utf-8')) : {};
+            const partialMsgs = readPartialAssistantMessages(dPath);
+            let createdTs = inData.created_at;
+            if (!createdTs) {
+              try {
+                createdTs = fs.statSync(dPath).mtime.toISOString();
+              } catch {
+                createdTs = '';
+              }
+            }
+            const firstPart = d.split('-')[0];
+            const parsedSeq = parseInt(firstPart, 10);
+            turnsById.set(d, {
+              turn_id: d,
+              turn_seq: !isNaN(parsedSeq) && /^\d+$/.test(firstPart) ? parsedSeq : 0,
+              state: 'running',
+              type: inData.turn_type || 'owner_chat',
+              prompt_text: promptText,
+              message: inData.prompt_text,
+              output: partialMsgs.join('\n\n'),
+              assistant_messages: partialMsgs,
+              created_at: createdTs || '',
+            });
+          } catch {}
+        }
+      }
+    }
+
+    // 2. Read active queue items
+    if (fs.existsSync(qDir) && fs.statSync(qDir).isDirectory()) {
+      const qFiles = fs.readdirSync(qDir);
+      for (const f of qFiles) {
+        if (!f.endsWith('.json') || f.startsWith('.')) continue;
+        const qPath = path.join(qDir, f);
+        try {
+          const qRec = JSON.parse(fs.readFileSync(qPath, 'utf-8'));
+          const stem = f.slice(0, -5);
+          const tid = String(qRec.turn_id || stem);
+          const qTs = qRec.created_at || qRec.queued_at || '';
+          if (!qRec.created_at) qRec.created_at = qTs;
+
+          if (turnsById.has(tid)) {
+            const existing = turnsById.get(tid);
+            if (['running', 'claimed', 'queued'].includes(existing.state || qRec.state) && existing.state !== 'done') {
+              Object.assign(existing, qRec);
+              if (!existing.assistant_messages || existing.assistant_messages.length === 0) {
+                const tSubdir = path.join(tDir, tid);
+                if (fs.existsSync(tSubdir) && fs.statSync(tSubdir).isDirectory()) {
+                  const partialMsgs = readPartialAssistantMessages(tSubdir);
+                  existing.assistant_messages = partialMsgs;
+                  existing.output = partialMsgs.join('\n\n');
+                }
+              }
+            }
+          } else {
+            if (qRec.output === undefined) qRec.output = '';
+            if (qRec.assistant_messages === undefined) qRec.assistant_messages = [];
+            const tSubdir = path.join(tDir, tid);
+            if (fs.existsSync(tSubdir) && fs.statSync(tSubdir).isDirectory()) {
+              const partialMsgs = readPartialAssistantMessages(tSubdir);
+              if (partialMsgs.length > 0) {
+                qRec.assistant_messages = partialMsgs;
+                qRec.output = partialMsgs.join('\n\n');
+              }
+            }
+            turnsById.set(tid, qRec);
+          }
+        } catch {}
+      }
+    }
+
+    const allTurns = Array.from(turnsById.values());
+    allTurns.sort(compareTurns);
+    if (order === 'desc') {
+      allTurns.reverse();
+    }
+
+    const totalCount = allTurns.length;
+    const paged = safeLimit > 0 ? allTurns.slice(safeOffset, safeOffset + safeLimit) : allTurns.slice(safeOffset);
+
+    return {
+      ok: true,
+      turns: paged,
+      count: totalCount,
+      limit: safeLimit,
+      offset: safeOffset,
+    };
+  },
+  getOrchestratorTurn: async (panel, payload, root) => {
+    const rawTurnId = payload?.turnId || payload?.turn_id || payload?.id;
+    if (!rawTurnId || !String(rawTurnId).trim()) {
+      const err: any = new Error('turn_id is required');
+      err.status = 400;
+      err.data = { error: 'turn_id is required' };
+      throw err;
+    }
+    const turnId = validateTurnId(String(rawTurnId));
+    const tDir = path.join(root, '.ai-orchestration', 'orchestrator', 'turns', turnId);
+    const qFile = path.join(root, '.ai-orchestration', 'orchestrator', 'queue', `${turnId}.json`);
+
+    let turnDoc: any = null;
+    const tJson = path.join(tDir, 'turn.json');
+    if (fs.existsSync(tJson) && fs.statSync(tJson).isFile()) {
+      try {
+        turnDoc = JSON.parse(fs.readFileSync(tJson, 'utf-8'));
+      } catch {}
+    } else if (fs.existsSync(qFile) && fs.statSync(qFile).isFile()) {
+      try {
+        turnDoc = JSON.parse(fs.readFileSync(qFile, 'utf-8'));
+      } catch {}
+    }
+
+    if (!turnDoc) {
+      const err: any = new Error(`Turn ${turnId} not found`);
+      err.status = 404;
+      err.data = { error: `Turn ${turnId} not found` };
+      throw err;
+    }
+
+    const promptFile = path.join(tDir, 'prompt.txt');
+    if (fs.existsSync(promptFile) && fs.statSync(promptFile).isFile() && turnDoc.prompt_text === undefined) {
+      try {
+        turnDoc.prompt_text = fs.readFileSync(promptFile, 'utf-8');
+      } catch {}
+    }
+
+    let assistantMsgs = turnDoc.assistant_messages;
+    if (!assistantMsgs && fs.existsSync(tDir) && fs.statSync(tDir).isDirectory()) {
+      assistantMsgs = readPartialAssistantMessages(tDir);
+      turnDoc.assistant_messages = assistantMsgs;
+    }
+    if (turnDoc.output === undefined) {
+      turnDoc.output = Array.isArray(assistantMsgs) ? assistantMsgs.join('\n\n') : String(assistantMsgs || '');
+    }
+
+    return { ok: true, turn: turnDoc };
+  },
+  pauseOrchestrator: async (panel, payload, root) => {
+    const data = await panel.cliClient.runJsonCommand<any>(
+      ['orchestrator', 'pause', '--workspace', root],
+      root
+    );
+    panel.postMessage({ type: 'orchestrator_paused', result: data });
+    panel.postMessage({ type: 'changed', areas: ['orchestrator', 'events'] });
+    return data;
+  },
+  resumeOrchestrator: async (panel, payload, root) => {
+    const data = await panel.cliClient.runJsonCommand<any>(
+      ['orchestrator', 'resume', '--workspace', root],
+      root
+    );
+    panel.postMessage({ type: 'orchestrator_resumed', result: data });
+    panel.postMessage({ type: 'changed', areas: ['orchestrator', 'events'] });
+    return data;
+  },
+  rotateOrchestrator: async (panel, payload, root) => {
+    const args = ['orchestrator', 'rotate', '--workspace', root];
+    if (payload?.tool) args.push('--tool', String(payload.tool));
+    if (payload?.model) args.push('--model', String(payload.model));
+    if (payload?.reason) args.push('--reason', String(payload.reason));
+    if (payload?.no_handoff || payload?.noHandoff) args.push('--no-handoff');
+
+    const data = await panel.cliClient.runJsonCommand<any>(args, root);
+    panel.postMessage({ type: 'orchestrator_rotated', result: data });
+    panel.postMessage({ type: 'changed', areas: ['orchestrator', 'events', 'sessions'] });
+    return data;
+  },
+  cancelOrchestratorTurn: async (panel, payload, root) => {
+    const turnId = payload?.turnId || payload?.turn_id || payload?.id;
+    if (!turnId || !String(turnId).trim()) {
+      const err: any = new Error('turn_id is required');
+      err.status = 400;
+      err.data = { error: 'turn_id is required' };
+      throw err;
+    }
+    const cleanId = validateTurnId(String(turnId));
+    const args = ['orchestrator', 'cancel', cleanId, '--workspace', root];
+    const data = await panel.cliClient.runJsonCommand<any>(args, root);
+    panel.postMessage({ type: 'turn_cancelled', turn_id: cleanId });
+    panel.postMessage({ type: 'changed', areas: ['orchestrator', 'queue', 'events'] });
+    return data;
+  },
+  runNextOrchestratorTurn: async (panel, payload, root) => {
+    const args = ['orchestrator', 'run-next', '--workspace', root];
+    if (payload?.timeout) {
+      args.push('--timeout', String(payload.timeout));
+    }
+    const data = await panel.cliClient.runJsonCommand<any>(args, root);
+    panel.postMessage({ type: 'changed', areas: ['orchestrator', 'queue', 'events'] });
+    return data;
+  },
+  reassignOrchestrator: async (panel, payload, root) => {
+    const tool = payload?.tool;
+    if (!tool || !String(tool).trim()) {
+      const err: any = new Error('tool is required');
+      err.status = 400;
+      err.data = { error: 'tool is required' };
+      throw err;
+    }
+    const expectHash = payload?.expect_hash || payload?.expect_plan_hash || payload?.expectHash;
+    if (!expectHash || !String(expectHash).trim()) {
+      const err: any = new Error('expect_hash is required');
+      err.status = 400;
+      err.data = { error: 'expect_hash is required' };
+      throw err;
+    }
+    const args = [
+      'orchestrator',
+      'reassign',
+      '--tool',
+      String(tool).trim(),
+      '--expect-hash',
+      String(expectHash).trim(),
+      '--workspace',
+      root,
+    ];
+    if (payload?.model) args.push('--model', String(payload.model));
+    const scope = payload?.scope || 'project';
+    args.push('--scope', String(scope));
+    if (payload?.no_handoff || payload?.noHandoff) args.push('--no-handoff');
+    if (payload?.timeout) args.push('--timeout', String(payload.timeout));
+
+    const data = await panel.cliClient.runJsonCommand<any>(args, root);
+    panel.postMessage({ type: 'orchestrator_reassigned', result: data });
+    panel.postMessage({ type: 'changed', areas: ['orchestrator', 'events', 'sessions', 'config'] });
+    return data;
+  },
+  applySetup: async (panel, payload, root) => {
+    const expectHash = payload?.expect_hash || payload?.expect_plan_hash || payload?.expectHash;
+    if (!expectHash || !String(expectHash).trim()) {
+      const err: any = new Error('expect_hash is required');
+      err.status = 400;
+      err.data = { error: 'expect_hash is required' };
+      throw err;
+    }
+    const scope = payload?.scope || 'project-local';
+    const args = [
+      'setup',
+      '--apply',
+      '--expect-hash',
+      String(expectHash).trim(),
+      '--scope',
+      String(scope),
+      '--workspace',
+      root,
+    ];
+    if (payload?.orchestrator) args.push('--orchestrator', String(payload.orchestrator));
+    if (payload?.executor) args.push('--executor', String(payload.executor));
+    const orchModel = payload?.orchestrator_model || payload?.orchestratorModel;
+    if (orchModel) args.push('--orchestrator-model', String(orchModel));
+    const execModel = payload?.executor_model || payload?.executorModel;
+    if (execModel) args.push('--executor-model', String(execModel));
+    const vmode = payload?.verification_mode || payload?.verificationMode;
+    if (vmode) args.push('--verification-mode', String(vmode));
+    if (payload?.start_orchestrator || payload?.startOrchestrator) args.push('--start-orchestrator');
+
+    const data = await panel.cliClient.runJsonCommand<any>(args, root);
+    panel.postMessage({ type: 'setup_applied', result: data });
+    panel.postMessage({ type: 'config_updated' });
+    panel.postMessage({ type: 'changed', areas: ['config', 'orchestrator', 'events', 'sessions'] });
+    return data;
   },
 };
 

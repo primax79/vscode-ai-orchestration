@@ -300,22 +300,22 @@ try {
       fail(`getProposedActions unexpected: ${JSON.stringify(propRes)}`);
     }
 
-    // confirmProposedAction -> 400 not implemented
+    // confirmProposedAction -> 400 missing expect_hash
     try {
       await CUSTOM_HANDLERS.confirmProposedAction(createMockPanel(), { actionId: 'act1' }, tmpDir);
       fail('confirmProposedAction must throw 400');
     } catch (e) {
-      if (e.status !== 400 || e.data?.error !== 'not-implemented' || e.data?.action_id !== 'act1') {
+      if (e.status !== 400 || e.data?.error !== 'missing_expect_hash' || e.data?.action_id !== 'act1') {
         fail(`confirmProposedAction error mismatch: ${JSON.stringify(e)}`);
       }
     }
 
-    // rejectProposedAction -> 400 not implemented
+    // rejectProposedAction -> 400 missing reason
     try {
       await CUSTOM_HANDLERS.rejectProposedAction(createMockPanel(), { actionId: 'act2' }, tmpDir);
       fail('rejectProposedAction must throw 400');
     } catch (e) {
-      if (e.status !== 400 || e.data?.error !== 'not-implemented' || e.data?.action_id !== 'act2') {
+      if (e.status !== 400 || e.data?.error !== 'missing_reason' || e.data?.action_id !== 'act2') {
         fail(`rejectProposedAction error mismatch: ${JSON.stringify(e)}`);
       }
     }
