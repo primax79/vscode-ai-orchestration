@@ -111,7 +111,21 @@ function runBridgeParityCheck() {
     process.exit(1);
   }
 
-  console.log(`PASS: All ${apiTypes.size} message types in api.ts are implemented in dashboard-panel.ts.`);
+  const requiredAggregateTypes = [
+    'getWorkspace',
+    'getWorkspaceTasks',
+    'getWorkspaceQuestions',
+    'getWorkspaceInbox',
+    'getWorkspaceRuns',
+  ];
+  for (const aggType of requiredAggregateTypes) {
+    if (!handledTypes.has(aggType)) {
+      console.error(`FAIL: Aggregate message type ${aggType} missing from dashboard-panel.ts!`);
+      process.exit(1);
+    }
+  }
+
+  console.log(`PASS: All ${apiTypes.size} message types in api.ts (including aggregate workspace handlers) are implemented in dashboard-panel.ts.`);
 }
 
 async function runCliStatusMappingTests() {

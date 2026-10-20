@@ -4,6 +4,63 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { CliClient, CliError } from '../cli-client';
+import {
+  ProjectInfo,
+  ProjectResolver,
+  getProjectResolver,
+  invalidateProjectResolver,
+  fastCountQuestions,
+  fastCountInbox,
+  canonicalizeTaskState,
+  sanitizeSlug,
+  UnknownProjectError,
+  ProjectRequiredError,
+  OutsideWorkspaceError,
+} from '../project-resolver';
+
+export const AGGREGATE_OR_GLOBAL_TYPES = new Set([
+  'getWorkspace',
+  'switchWorkspace',
+  'getWorkspaceTasks',
+  'getWorkspaceQuestions',
+  'getWorkspaceInbox',
+  'getWorkspaceRuns',
+  'previewFetchRepos',
+  'fetchRepos',
+]);
+
+export function resolveMessageTargetRoot(
+  type: string,
+  payload: any,
+  boundRoot: string,
+  cliClient?: CliClient
+): { targetRoot: string; projectId?: string } {
+  const aiOrchBin = cliClient?.resolveCliPath ? cliClient.resolveCliPath(boundRoot) : null;
+  const resolver = getProjectResolver(boundRoot, aiOrchBin);
+
+  if (AGGREGATE_OR_GLOBAL_TYPES.has(type)) {
+    if (payload && typeof payload === 'object' && payload.project) {
+      const proj = resolver.resolveProject(String(payload.project));
+      return { targetRoot: proj.root, projectId: proj.id };
+    }
+    return { targetRoot: boundRoot };
+  }
+
+  // Global-scope config/env calls with no explicit project may run against boundRoot
+  const explicitProject = payload && typeof payload === 'object' ? payload.project : undefined;
+  if (
+    (explicitProject === undefined || explicitProject === null || !String(explicitProject).trim()) &&
+    payload &&
+    typeof payload === 'object' &&
+    payload.scope === 'global'
+  ) {
+    return { targetRoot: boundRoot };
+  }
+
+  const proj = resolver.resolveProject(explicitProject);
+  return { targetRoot: proj.root, projectId: proj.id };
+}
+
 
 export type CliArgBuilder = (payload: any, root: string) => string[];
 export type CustomHandler = (panel: DashboardPanel, payload: any, root: string) => Promise<any>;
@@ -1275,14 +1332,368 @@ export function computeTriggerToggle(
 
 export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
   getWorkspace: async (panel, payload, root) => {
+    const aiOrchBin = panel?.cliClient?.resolveCliPath ? panel.cliClient.resolveCliPath(root) : null;
+    const resolver = getProjectResolver(root, aiOrchBin);
+    const { mode, projects, subWorkspaces } = resolver.getWorkspaceInfo();
+    const runCli = async (args: string[], cwd?: string) => {
+      if (!panel?.cliClient) return {};
+      return panel.cliClient.runJsonCommand<any>(args, cwd || root);
+    };
+
+    const projectCounts = await Promise.all(projects.map((p) => resolver.getProjectCounts(p, runCli)));
+    const projectTasks = await Promise.all(projects.map((p) => resolver.loadProjectTasks(p, runCli)));
+
+    const projectsSummary = projects.map((p, idx) => {
+      const counts = projectCounts[idx];
+      const tasks = projectTasks[idx] || [];
+      const openQ = fastCountQuestions(p.tasksDir);
+      const inboxN = fastCountInbox(p.tasksDir);
+      const conditional = tasks.reduce((acc: number, t: any) => acc + (t?.conditional ? 1 : 0), 0);
+      return {
+        id: p.id,
+        path: p.path,
+        kind: p.kind,
+        uuid: p.uuid ?? null,
+        counts,
+        conditional,
+        open_questions: openQ,
+        inbox_notes: inboxN,
+      };
+    });
+
     const tasksDir = path.join(root, 'tasks');
-    const hasTasks = fs.existsSync(tasksDir);
+    const hasTasks = fs.existsSync(tasksDir) && fs.statSync(tasksDir).isDirectory();
     return {
+      root,
       workspace_path: root,
       workspace_name: path.basename(root),
+      mode,
+      registered: mode === 'registered',
+      discovered: mode === 'discovered',
+      single: mode === 'single',
       has_tasks_dir: hasTasks,
       tasks_path: hasTasks ? tasksDir : null,
+      projects: projectsSummary,
+      sub_workspaces: subWorkspaces,
     };
+  },
+  getWorkspaceTasks: async (panel, payload, root) => {
+    const aiOrchBin = panel?.cliClient?.resolveCliPath ? panel.cliClient.resolveCliPath(root) : null;
+    const resolver = getProjectResolver(root, aiOrchBin);
+    const { projects } = resolver.getWorkspaceInfo();
+    const runCli = async (args: string[], cwd?: string) => {
+      if (!panel?.cliClient) return {};
+      return panel.cliClient.runJsonCommand<any>(args, cwd || root);
+    };
+
+    const projectTasksList = await Promise.all(projects.map((p) => resolver.loadProjectTasks(p, runCli)));
+
+    const tasksByProjAndId = new Map<string, Map<string, any>>();
+    for (let i = 0; i < projects.length; i++) {
+      const p = projects[i];
+      const pTasks = projectTasksList[i] || [];
+      const pMap = new Map<string, any>();
+      for (const t of pTasks) {
+        const tid = String(t?.id || '');
+        pMap.set(tid, t);
+      }
+      tasksByProjAndId.set(p.id, pMap);
+    }
+
+    const flattenedTasks: any[] = [];
+    for (let i = 0; i < projects.length; i++) {
+      const p = projects[i];
+      const pTasks = projectTasksList[i] || [];
+      for (const t of pTasks) {
+        const tid = String(t?.id || '');
+        const short = t?.short;
+        const shortTitleVal = t?.short_title || short || t?.title || '';
+        const rawState = t?.state || t?.canonical_state || 'todo';
+        const kind =
+          t?.kind ||
+          (tid.includes('.') && !tid.startsWith('T')
+            ? 'initiative_task'
+            : tid.startsWith('T')
+            ? 'emergent'
+            : 'initiative');
+
+        let coords: any[] = Array.isArray(t?.coordinates) ? [...t.coordinates] : [];
+        if (coords.length === 0 && Array.isArray(t?.coordinates_refs)) {
+          coords = [...t.coordinates_refs];
+        }
+        if (coords.length === 0 && t?.coordinates_raw) {
+          const raw = t.coordinates_raw;
+          if (typeof raw === 'string') {
+            coords = raw.split(',').map((x: string) => x.trim()).filter(Boolean);
+          } else if (Array.isArray(raw)) {
+            coords = [...raw];
+          }
+        }
+        if (coords.length === 0 && t?.headers && typeof t.headers === 'object' && t.headers.coordinates) {
+          const raw = t.headers.coordinates;
+          if (typeof raw === 'string') {
+            coords = raw.split(',').map((x: string) => x.trim()).filter(Boolean);
+          } else if (Array.isArray(raw)) {
+            coords = [...raw];
+          }
+        }
+        if (coords.length === 0 && t?.fields && typeof t.fields === 'object' && t.fields.coordinates) {
+          let fVal = t.fields.coordinates;
+          if (fVal && typeof fVal === 'object' && !Array.isArray(fVal)) {
+            fVal = fVal.value;
+          }
+          if (typeof fVal === 'string') {
+            coords = fVal.split(',').map((x: string) => x.trim()).filter(Boolean);
+          } else if (Array.isArray(fVal)) {
+            coords = [...fVal];
+          }
+        }
+
+        const resolvedCoords: any[] = [];
+        for (const c of coords) {
+          let targetProj: string | null = null;
+          let targetId: string | null = null;
+          let fallbackState = 'open';
+          let fallbackShortTitle = '';
+
+          if (c && typeof c === 'object') {
+            targetProj = c.project ? String(c.project) : null;
+            targetId = c.id ? String(c.id) : null;
+            fallbackState = c.state || 'open';
+            fallbackShortTitle = c.short_title || c.short || c.title || '';
+          } else if (typeof c === 'string') {
+            const cClean = c.trim();
+            if (cClean.includes('/')) {
+              const idx = cClean.indexOf('/');
+              targetProj = cClean.slice(0, idx).trim();
+              targetId = cClean.slice(idx + 1).trim();
+            } else if (cClean.includes(':')) {
+              const idx = cClean.indexOf(':');
+              targetProj = cClean.slice(0, idx).trim();
+              targetId = cClean.slice(idx + 1).trim();
+            }
+          }
+
+          if (targetProj && targetId) {
+            let targetT: any = null;
+            let targetActualProj = targetProj;
+            const directMap = tasksByProjAndId.get(targetProj);
+            if (directMap && directMap.has(targetId)) {
+              targetT = directMap.get(targetId);
+            } else {
+              for (const projObj of projects) {
+                const folderName = path.basename(projObj.root);
+                const aliases = new Set([
+                  projObj.id,
+                  projObj.path,
+                  folderName,
+                  sanitizeSlug(projObj.id),
+                  sanitizeSlug(folderName),
+                ]);
+                if (aliases.has(targetProj) && tasksByProjAndId.has(projObj.id)) {
+                  const aliasMap = tasksByProjAndId.get(projObj.id)!;
+                  if (aliasMap.has(targetId)) {
+                    targetT = aliasMap.get(targetId);
+                    targetActualProj = projObj.id;
+                    break;
+                  }
+                }
+              }
+            }
+
+            if (targetT) {
+              const rawSt = targetT.canonical_state || targetT.state || fallbackState;
+              const resolvedState = canonicalizeTaskState(rawSt);
+              const resolvedShort = targetT.short_title || targetT.short || targetT.title || fallbackShortTitle;
+              resolvedCoords.push({
+                project: targetActualProj,
+                id: targetId,
+                short_title: resolvedShort,
+                state: resolvedState,
+              });
+            } else {
+              resolvedCoords.push({
+                project: targetProj,
+                id: targetId,
+                short_title: fallbackShortTitle,
+                state: canonicalizeTaskState(fallbackState),
+              });
+            }
+          }
+        }
+
+        const item: any = {
+          project: p.id,
+          id: tid,
+          qualified_id: `${p.id}/${tid}`,
+          title: t?.title || '',
+          short,
+          short_title: shortTitleVal,
+          state: rawState,
+          priority: t?.priority || 'P2',
+          kind,
+          labels: Array.isArray(t?.labels) ? [...t.labels] : [],
+          coordinates: resolvedCoords,
+        };
+        if (t?.conditional) {
+          item.conditional = true;
+          item.conditions = Array.isArray(t?.conditions) ? [...t.conditions] : [];
+        }
+        flattenedTasks.push(item);
+      }
+    }
+
+    const rawProjects = payload?.project;
+    const filterProjects: string[] = Array.isArray(rawProjects)
+      ? rawProjects.flatMap((k: any) => String(k).split(',')).map((x: string) => x.trim()).filter(Boolean)
+      : typeof rawProjects === 'string'
+      ? rawProjects.split(',').map((x: string) => x.trim()).filter(Boolean)
+      : [];
+
+    const rawStates = payload?.state;
+    const filterStates: string[] = Array.isArray(rawStates)
+      ? rawStates.flatMap((k: any) => String(k).split(',')).map((x: string) => x.trim().toLowerCase()).filter(Boolean)
+      : typeof rawStates === 'string'
+      ? rawStates.split(',').map((x: string) => x.trim().toLowerCase()).filter(Boolean)
+      : [];
+
+    const filterKind = payload?.kind ? String(payload.kind).trim().toLowerCase() : '';
+    const filterLabel = payload?.label ? String(payload.label).trim() : '';
+    const filterText = payload?.text ? String(payload.text).trim().toLowerCase() : '';
+
+    const filtered: any[] = [];
+    for (const item of flattenedTasks) {
+      if (filterProjects.length > 0 && !filterProjects.includes(item.project)) {
+        continue;
+      }
+      if (filterStates.length > 0) {
+        const stClean = String(item.state || '').toLowerCase().replace(/[- ]+/g, '_');
+        let matchesState = false;
+        for (const fs of filterStates) {
+          const fsClean = fs.replace(/[- ]+/g, '_');
+          if (stClean === fsClean || String(item.state || '').toLowerCase() === fs) {
+            matchesState = true;
+            break;
+          }
+        }
+        if (!matchesState) continue;
+      }
+      if (filterKind && String(item.kind || '').toLowerCase() !== filterKind) {
+        continue;
+      }
+      if (filterLabel && !(item.labels || []).includes(filterLabel)) {
+        continue;
+      }
+      if (filterText) {
+        const haystack = `${item.title} ${item.short_title} ${item.id} ${item.qualified_id}`.toLowerCase();
+        if (!haystack.includes(filterText)) {
+          continue;
+        }
+      }
+      filtered.push(item);
+    }
+
+    let page = 1;
+    if (payload?.page !== undefined && payload?.page !== null) {
+      const parsedPage = parseInt(String(payload.page), 10);
+      if (!isNaN(parsedPage) && parsedPage >= 1) {
+        page = parsedPage;
+      }
+    }
+
+    let perPage = 50;
+    const rawPerPage = payload?.per_page ?? payload?.limit;
+    if (rawPerPage !== undefined && rawPerPage !== null) {
+      const parsedPerPage = parseInt(String(rawPerPage), 10);
+      if (!isNaN(parsedPerPage)) {
+        perPage = Math.max(1, Math.min(500, parsedPerPage));
+      }
+    }
+
+    const total = filtered.length;
+    const startIdx = (page - 1) * perPage;
+    const endIdx = startIdx + perPage;
+    const paged = filtered.slice(startIdx, endIdx);
+
+    return {
+      ok: true,
+      tasks: paged,
+      items: paged,
+      total,
+      page,
+      per_page: perPage,
+    };
+  },
+  getWorkspaceQuestions: async (panel, payload, root) => {
+    const aiOrchBin = panel?.cliClient?.resolveCliPath ? panel.cliClient.resolveCliPath(root) : null;
+    const resolver = getProjectResolver(root, aiOrchBin);
+    const { projects } = resolver.getWorkspaceInfo();
+
+    const getProjQuestions = async (p: ProjectInfo) => {
+      if (!fs.existsSync(p.tasksDir) || !fs.statSync(p.tasksDir).isDirectory()) return [];
+      const args = ['questions', 'list', '--tasks-dir', p.tasksDir];
+      if (payload?.status && payload.status !== 'all') args.push('--status', String(payload.status));
+      if (payload?.blocks) args.push('--blocks', String(payload.blocks));
+      try {
+        const data = await panel.cliClient.runJsonCommand<any>(args, p.root);
+        const items: any[] = (data && typeof data === 'object' && (data.questions || data.items)) || [];
+        return items.map((item) => ({ ...item, project: p.id }));
+      } catch {
+        return [];
+      }
+    };
+
+    const results = await Promise.all(projects.map((p) => getProjQuestions(p)));
+    const allQuestions = results.flat();
+    return { ok: true, questions: allQuestions, items: allQuestions };
+  },
+  getWorkspaceInbox: async (panel, payload, root) => {
+    const aiOrchBin = panel?.cliClient?.resolveCliPath ? panel.cliClient.resolveCliPath(root) : null;
+    const resolver = getProjectResolver(root, aiOrchBin);
+    const { projects } = resolver.getWorkspaceInfo();
+
+    const getProjInbox = async (p: ProjectInfo) => {
+      if (!fs.existsSync(p.tasksDir) || !fs.statSync(p.tasksDir).isDirectory()) return [];
+      const args = ['inbox', 'list', '--tasks-dir', p.tasksDir];
+      if (payload?.status) args.push('--status', String(payload.status));
+      try {
+        const data = await panel.cliClient.runJsonCommand<any>(args, p.root);
+        const items: any[] = (data && typeof data === 'object' && (data.notes || data.items)) || [];
+        return items.map((item) => ({ ...item, project: p.id }));
+      } catch {
+        return [];
+      }
+    };
+
+    const results = await Promise.all(projects.map((p) => getProjInbox(p)));
+    const allNotes = results.flat();
+    return { ok: true, notes: allNotes, items: allNotes };
+  },
+  getWorkspaceRuns: async (panel, payload, root) => {
+    const aiOrchBin = panel?.cliClient?.resolveCliPath ? panel.cliClient.resolveCliPath(root) : null;
+    const resolver = getProjectResolver(root, aiOrchBin);
+    const { projects } = resolver.getWorkspaceInfo();
+
+    const getProjRuns = async (p: ProjectInfo) => {
+      const args = ['run', 'list', '--workspace', p.root];
+      if (payload?.task) args.push('--task', String(payload.task));
+      if (payload?.note) args.push('--note', String(payload.note));
+      const active = payload?.active;
+      if (active === true || (typeof active === 'string' && ['1', 'true', 'yes', ''].includes(active.toLowerCase()))) {
+        args.push('--active');
+      }
+      try {
+        const data = await panel.cliClient.runJsonCommand<any>(args, p.root);
+        const items: any[] = (data && typeof data === 'object' && (data.runs || data.items)) || [];
+        return items.map((item) => ({ ...item, project: p.id }));
+      } catch {
+        return [];
+      }
+    };
+
+    const results = await Promise.all(projects.map((p) => getProjRuns(p)));
+    const allRuns = results.flat();
+    return { ok: true, runs: allRuns, items: allRuns };
   },
   switchWorkspace: async (panel, payload, root) => {
     const target = payload?.workspacePath;
@@ -1291,6 +1702,8 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
       err.status = 400;
       throw err;
     }
+    invalidateProjectResolver(root);
+    invalidateProjectResolver(target);
     await panel.bindWorkspace(target);
     return { ok: true, workspace_path: target };
   },
@@ -2919,6 +3332,26 @@ for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
   };
 }
 
+export function dispatchMessage(
+  panel: DashboardPanel,
+  type: string,
+  payload: any,
+  boundRoot: string
+): Promise<any> {
+  const handler = HANDLER_MAP[type];
+  if (!handler) {
+    const err: any = new Error(`Unhandled message type: ${type}`);
+    err.status = 400;
+    return Promise.reject(err);
+  }
+  try {
+    const { targetRoot } = resolveMessageTargetRoot(type, payload, boundRoot, panel?.cliClient);
+    return handler(panel, payload, targetRoot);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
 export const ALL_HANDLED_TYPES = new Set(Object.keys(HANDLER_MAP));
 
 export class DashboardPanel {
@@ -3019,6 +3452,8 @@ export class DashboardPanel {
   }
 
   public async bindWorkspace(newRoot: string) {
+    invalidateProjectResolver(this._boundRoot);
+    invalidateProjectResolver(newRoot);
     this._boundRoot = newRoot;
     this._setupWatchers();
     if (this.onFolderBound) {
@@ -3040,83 +3475,140 @@ export class DashboardPanel {
       return;
     }
 
-    // File watchers stay on even with the event stream: hand edits and git pulls emit no events.
-    // Watch bound folder's tasks/**
-    const tasksPattern = new vscode.RelativePattern(this._boundRoot, 'tasks/**');
-    const tasksWatcher = vscode.workspace.createFileSystemWatcher(tasksPattern);
-    const isQuestionPath = (uri: vscode.Uri) => {
-      const rel = path.relative(this._boundRoot, uri.fsPath).replace(/\\/g, '/');
-      return rel.startsWith('tasks/questions/') || rel === 'tasks/questions';
+    // Watch 00-INDEX.md across workspace to invalidate project discovery cache
+    const indexPattern = new vscode.RelativePattern(this._boundRoot, '**/tasks/00-INDEX.md');
+    const indexWatcher = vscode.workspace.createFileSystemWatcher(indexPattern);
+    const onIndexLayoutChange = () => {
+      invalidateProjectResolver(this._boundRoot);
+      this._setupWatchers();
+      this._notifyTasksChanged();
     };
-    tasksWatcher.onDidChange((uri) => { if (!isQuestionPath(uri)) this._notifyTasksChanged(); });
-    tasksWatcher.onDidCreate((uri) => { if (!isQuestionPath(uri)) this._notifyTasksChanged(); });
-    tasksWatcher.onDidDelete((uri) => { if (!isQuestionPath(uri)) this._notifyTasksChanged(); });
+    indexWatcher.onDidCreate(onIndexLayoutChange);
+    indexWatcher.onDidDelete(onIndexLayoutChange);
+    indexWatcher.onDidChange(() => {
+      invalidateProjectResolver(this._boundRoot);
+    });
+    this._watcherDisposables.push(indexWatcher);
 
-    // Watch bound folder's tasks/questions/**
-    const questionsPattern = new vscode.RelativePattern(this._boundRoot, 'tasks/questions/**');
-    const questionsWatcher = vscode.workspace.createFileSystemWatcher(questionsPattern);
-    questionsWatcher.onDidChange(() => this._notifyQuestionsChanged());
-    questionsWatcher.onDidCreate(() => this._notifyQuestionsChanged());
-    questionsWatcher.onDidDelete(() => this._notifyQuestionsChanged());
+    const aiOrchBin = this.cliClient?.resolveCliPath ? this.cliClient.resolveCliPath(this._boundRoot) : null;
+    const resolver = getProjectResolver(this._boundRoot, aiOrchBin);
+    let projects = resolver.getProjects();
+    if (!projects || projects.length === 0) {
+      projects = [
+        {
+          id: '_workspace',
+          path: '.',
+          kind: 'project',
+          root: this._boundRoot,
+          tasksDir: path.join(this._boundRoot, 'tasks'),
+        },
+      ];
+    }
 
-    // Watch bound folder's .ai-orchestration/runs/*/run.json
-    const runsPattern = new vscode.RelativePattern(this._boundRoot, '.ai-orchestration/runs/*/run.json');
-    const runsWatcher = vscode.workspace.createFileSystemWatcher(runsPattern);
-    runsWatcher.onDidChange(() => this._notifyRunsChanged());
-    runsWatcher.onDidCreate(() => this._notifyRunsChanged());
-    runsWatcher.onDidDelete(() => this._notifyRunsChanged());
+    // File watchers stay on even with the event stream: hand edits and git pulls emit no events.
+    for (const proj of projects) {
+      const pRoot = proj.root;
+      const pId = proj.id;
 
-    this._watcherDisposables.push(tasksWatcher, questionsWatcher, runsWatcher);
+      const tasksPattern = new vscode.RelativePattern(pRoot, 'tasks/**');
+      const tasksWatcher = vscode.workspace.createFileSystemWatcher(tasksPattern);
+      const isQuestionPath = (uri?: vscode.Uri) => {
+        if (!uri || !uri.fsPath) return false;
+        const rel = path.relative(pRoot, uri.fsPath).replace(/\\/g, '/');
+        return rel.startsWith('tasks/questions/') || rel === 'tasks/questions';
+      };
+      tasksWatcher.onDidChange((uri) => { if (!isQuestionPath(uri)) this._notifyTasksChanged(true, pId); });
+      tasksWatcher.onDidCreate((uri) => { if (!isQuestionPath(uri)) this._notifyTasksChanged(true, pId); });
+      tasksWatcher.onDidDelete((uri) => { if (!isQuestionPath(uri)) this._notifyTasksChanged(true, pId); });
+
+      const questionsPattern = new vscode.RelativePattern(pRoot, 'tasks/questions/**');
+      const questionsWatcher = vscode.workspace.createFileSystemWatcher(questionsPattern);
+      questionsWatcher.onDidChange(() => this._notifyQuestionsChanged(true, pId));
+      questionsWatcher.onDidCreate(() => this._notifyQuestionsChanged(true, pId));
+      questionsWatcher.onDidDelete(() => this._notifyQuestionsChanged(true, pId));
+
+      const runsPattern = new vscode.RelativePattern(pRoot, '.ai-orchestration/runs/*/run.json');
+      const runsWatcher = vscode.workspace.createFileSystemWatcher(runsPattern);
+      runsWatcher.onDidChange(() => this._notifyRunsChanged(pId));
+      runsWatcher.onDidCreate(() => this._notifyRunsChanged(pId));
+      runsWatcher.onDidDelete(() => this._notifyRunsChanged(pId));
+
+      this._watcherDisposables.push(tasksWatcher, questionsWatcher, runsWatcher);
+    }
+  }
+
+  private _defaultProjectId(): string | undefined {
+    if (!this._boundRoot) return undefined;
+    try {
+      const aiOrchBin = this.cliClient?.resolveCliPath ? this.cliClient.resolveCliPath(this._boundRoot) : null;
+      const resolver = getProjectResolver(this._boundRoot, aiOrchBin);
+      const projects = resolver.getProjects();
+      if (projects.length === 1) return projects[0].id;
+      if (projects.length > 1) return '_workspace';
+    } catch {}
+    return undefined;
   }
 
   // `refreshExtension` is false when the extension itself asked for the notification
   // (refreshAll -> notify*Changed): calling onTasksUpdated (= refreshAll) back from there
   // made an endless, doubling refresh loop (a process storm before 0.2.3, a webview that
   // reloads every few hundred ms after it).
-  private _notifyTasksChanged(refreshExtension = true) {
+  private _notifyTasksChanged(refreshExtension = true, project?: string) {
     if (this._tasksDebounceTimer) clearTimeout(this._tasksDebounceTimer);
+    const proj = project || this._defaultProjectId();
     this._tasksDebounceTimer = setTimeout(() => {
       this._tasksDebounceTimer = null;
-      this._panel.webview.postMessage({ type: 'changed', areas: ['tasks'] });
+      const msg: any = { type: 'changed', areas: ['tasks'] };
+      if (proj) msg.project = proj;
+      this._panel.webview.postMessage(msg);
       if (refreshExtension && this.onTasksUpdated) {
         this.onTasksUpdated();
       }
     }, 50);
   }
 
-  private _notifyQuestionsChanged(refreshExtension = true) {
+  private _notifyQuestionsChanged(refreshExtension = true, project?: string) {
     if (this._questionsDebounceTimer) clearTimeout(this._questionsDebounceTimer);
+    const proj = project || this._defaultProjectId();
     this._questionsDebounceTimer = setTimeout(() => {
       this._questionsDebounceTimer = null;
-      this._panel.webview.postMessage({ type: 'changed', areas: ['questions', 'tasks'] });
+      const msg: any = { type: 'changed', areas: ['questions', 'tasks'] };
+      if (proj) msg.project = proj;
+      this._panel.webview.postMessage(msg);
       if (refreshExtension && this.onTasksUpdated) {
         this.onTasksUpdated();
       }
     }, 50);
   }
 
-  private _notifyRunsChanged() {
+  private _notifyRunsChanged(project?: string) {
     if (this._runsDebounceTimer) clearTimeout(this._runsDebounceTimer);
+    const proj = project || this._defaultProjectId();
     this._runsDebounceTimer = setTimeout(() => {
       this._runsDebounceTimer = null;
-      this._panel.webview.postMessage({ type: 'changed', areas: ['runs'] });
+      const msg: any = { type: 'changed', areas: ['runs'] };
+      if (proj) msg.project = proj;
+      this._panel.webview.postMessage(msg);
     }, 50);
   }
 
   /** Called by the extension's own refresh: updates the webview only. */
-  public notifyTasksChanged() {
-    this._notifyTasksChanged(false);
+  public notifyTasksChanged(project?: string) {
+    this._notifyTasksChanged(false, project);
   }
 
   /** Called by the extension's own refresh: updates the webview only. */
-  public notifyQuestionsChanged() {
-    this._notifyQuestionsChanged(false);
+  public notifyQuestionsChanged(project?: string) {
+    this._notifyQuestionsChanged(false, project);
   }
 
   /** Called when new events arrive from the event stream: updates the webview only. */
-  public notifyAreasChanged(areas: string[]) {
+  public notifyAreasChanged(areas: string[], project?: string) {
     if (this._panel && Array.isArray(areas) && areas.length > 0) {
-      this._panel.webview.postMessage({ type: 'changed', areas });
+      const proj = project || this._defaultProjectId();
+      const msg: any = { type: 'changed', areas };
+      if (proj) msg.project = proj;
+      this._panel.webview.postMessage(msg);
     }
   }
 
@@ -3131,14 +3623,7 @@ export class DashboardPanel {
     const root = this.getActiveWorkspaceRoot();
 
     try {
-      const handler = HANDLER_MAP[type];
-      if (!handler) {
-        const err: any = new Error(`Unhandled message type: ${type}`);
-        err.status = 400;
-        throw err;
-      }
-
-      const data = await handler(this, payload, root);
+      const data = await dispatchMessage(this, type, payload, root);
       this._respond(id, data);
     } catch (e: any) {
       const status = e instanceof CliError ? e.status : (e.status || 500);

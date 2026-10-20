@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { CliClient } from './cli-client';
 import { shortTitle } from './short-title';
 import { formatQuestionNotification } from './question-notifier';
+import { getProjectResolver, invalidateProjectResolver, ProjectInfo } from './project-resolver';
 
 export interface OrchestrationEventLike {
   seq: number;
@@ -261,7 +262,7 @@ export class EventWatcher implements vscode.Disposable {
     private readonly context: vscode.ExtensionContext,
     private readonly cliClient: CliClient,
     private readonly getBoundRoot: () => string,
-    private readonly onEventsReceived: (events: OrchestrationEventLike[], areas: string[]) => void
+    private readonly onEventsReceived: (events: OrchestrationEventLike[], areas: string[], project?: string) => void
   ) {
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 8);
     this.statusBarItem.command = 'aiOrchestration.openDashboard';
@@ -272,8 +273,26 @@ export class EventWatcher implements vscode.Disposable {
     return this.statusBarItem;
   }
 
+  private _getProjectsForRoot(root: string): ProjectInfo[] {
+    try {
+      const aiOrchBin = this.cliClient?.resolveCliPath ? this.cliClient.resolveCliPath(root) : null;
+      const resolver = getProjectResolver(root, aiOrchBin);
+      const projs = resolver.getProjects();
+      if (projs && projs.length > 0) return projs;
+    } catch {}
+    return [
+      {
+        id: '_workspace',
+        path: '.',
+        kind: 'project',
+        root,
+        tasksDir: path.join(root, 'tasks'),
+      },
+    ];
+  }
+
   /**
-   * Binds to a workspace folder and configures the FileSystemWatcher on chunks.json.
+   * Binds to a workspace folder and configures the FileSystemWatcher on chunks.json and every project's tasks/ tree.
    */
   public bindFolder(root: string): void {
     if (this.currentBoundRoot === root) {
@@ -289,23 +308,53 @@ export class EventWatcher implements vscode.Disposable {
       return;
     }
 
-    // Watch .ai-orchestration/events/chunks.json and .ai-orchestration/events directory
-    const manifestPattern = new vscode.RelativePattern(root, '.ai-orchestration/events/chunks.json');
-    const manifestWatcher = vscode.workspace.createFileSystemWatcher(manifestPattern);
+    const projects = this._getProjectsForRoot(root);
+    const watchedEventRoots = new Set<string>([root]);
+    for (const p of projects) {
+      watchedEventRoots.add(p.root);
+    }
 
-    const onManifestChange = () => this.schedulePoll();
-    manifestWatcher.onDidChange(onManifestChange);
-    manifestWatcher.onDidCreate(onManifestChange);
+    for (const evRoot of watchedEventRoots) {
+      // Watch .ai-orchestration/events/chunks.json and .ai-orchestration/events directory
+      const manifestPattern = new vscode.RelativePattern(evRoot, '.ai-orchestration/events/chunks.json');
+      const manifestWatcher = vscode.workspace.createFileSystemWatcher(manifestPattern);
 
-    // Also watch for creation/deletion of events directory or orchestrator.json
-    const orchPattern = new vscode.RelativePattern(root, '.ai-orchestration/orchestrator.json');
-    const orchWatcher = vscode.workspace.createFileSystemWatcher(orchPattern);
-    const onOrchChange = () => this.updateOrchestratorStatusBar();
-    orchWatcher.onDidChange(onOrchChange);
-    orchWatcher.onDidCreate(onOrchChange);
-    orchWatcher.onDidDelete(onOrchChange);
+      const onManifestChange = () => this.schedulePoll();
+      manifestWatcher.onDidChange(onManifestChange);
+      manifestWatcher.onDidCreate(onManifestChange);
 
-    this.folderWatchers.push(manifestWatcher, orchWatcher);
+      // Also watch for creation/deletion of events directory or orchestrator.json
+      const orchPattern = new vscode.RelativePattern(evRoot, '.ai-orchestration/orchestrator.json');
+      const orchWatcher = vscode.workspace.createFileSystemWatcher(orchPattern);
+      const onOrchChange = () => this.updateOrchestratorStatusBar();
+      orchWatcher.onDidChange(onOrchChange);
+      orchWatcher.onDidCreate(onOrchChange);
+      orchWatcher.onDidDelete(onOrchChange);
+
+      this.folderWatchers.push(manifestWatcher, orchWatcher);
+    }
+
+    // Watch every project's tasks/ tree and invalidate resolver cache on tasks/00-INDEX.md changes
+    for (const proj of projects) {
+      const pRoot = proj.root;
+      const pId = proj.id;
+      const tasksPattern = new vscode.RelativePattern(pRoot, 'tasks/**');
+      const tasksWatcher = vscode.workspace.createFileSystemWatcher(tasksPattern);
+      const onTaskFileEvent = (uri?: vscode.Uri) => {
+        if (uri && uri.fsPath && uri.fsPath.endsWith('00-INDEX.md')) {
+          invalidateProjectResolver(root);
+        }
+        const rel = uri && uri.fsPath ? path.relative(pRoot, uri.fsPath).replace(/\\/g, '/') : '';
+        const isQ = rel.startsWith('tasks/questions/') || rel === 'tasks/questions';
+        const isInbox = rel.startsWith('tasks/_inbox/') || rel === 'tasks/_inbox';
+        const areas = isQ ? ['questions', 'tasks'] : isInbox ? ['inbox', 'tasks'] : ['tasks'];
+        this.onEventsReceived([], areas, pId);
+      };
+      tasksWatcher.onDidChange(onTaskFileEvent);
+      tasksWatcher.onDidCreate(onTaskFileEvent);
+      tasksWatcher.onDidDelete(onTaskFileEvent);
+      this.folderWatchers.push(tasksWatcher);
+    }
 
     // Initial check: if lastEventSeq is unset, seed it from the engine without toasting past events
     this.initializeSequenceSeed(root);
@@ -390,6 +439,30 @@ export class EventWatcher implements vscode.Disposable {
     const root = this.getBoundRoot();
     if (!root || !fs.existsSync(root)) return;
 
+    const projects = this._getProjectsForRoot(root);
+    const pollTargets: Array<{ root: string; projectId?: string }> = [];
+    const seenRoots = new Set<string>();
+    const normPath = (p: string) => (fs.existsSync(p) ? fs.realpathSync(p) : path.resolve(p));
+    const normBoundRoot = normPath(root);
+
+    for (const p of projects) {
+      const np = normPath(p.root);
+      if (!seenRoots.has(np)) {
+        seenRoots.add(np);
+        const targetRoot = np === normBoundRoot ? root : p.root;
+        pollTargets.push({ root: targetRoot, projectId: p.id });
+      }
+    }
+    if (!seenRoots.has(normBoundRoot)) {
+      pollTargets.push({ root, projectId: projects.length === 1 ? projects[0].id : '_workspace' });
+    }
+
+    for (const target of pollTargets) {
+      await this._pollSingleRoot(target.root, target.projectId);
+    }
+  }
+
+  private async _pollSingleRoot(root: string, projectId?: string): Promise<void> {
     const eventsDir = path.join(root, '.ai-orchestration', 'events');
     if (!fs.existsSync(eventsDir)) return;
 
@@ -479,7 +552,7 @@ export class EventWatcher implements vscode.Disposable {
       await this.context.workspaceState.update(questionsKey, Array.from(notifiedQuestions));
 
       // Forward to webview & views via callback
-      this.onEventsReceived(newEvents, areas);
+      this.onEventsReceived(newEvents, areas, projectId);
 
       if (areas.includes('orchestrator')) {
         this.updateOrchestratorStatusBar();

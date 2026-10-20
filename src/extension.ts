@@ -7,11 +7,13 @@ import {
   TaskTreeItem,
   InitiativeTreeItem,
   DecisionTreeItem,
+  ProjectGroupTreeItem,
 } from './views/task-tree-provider';
 import {
   DecisionsTreeProvider,
   DecisionGroupTreeItem,
   DecisionQuestionTreeItem,
+  DecisionProjectTreeItem,
   getDecisionsTreeData,
   getBlockedTaskIds,
   groupOpenQuestions,
@@ -21,6 +23,9 @@ import {
   HANDLER_MAP,
   CLI_COMMAND_MAP,
   CUSTOM_HANDLERS,
+  AGGREGATE_OR_GLOBAL_TYPES,
+  resolveMessageTargetRoot,
+  dispatchMessage,
   NOTE_ID_RE,
   requireNoteId,
   requireAttachmentName,
@@ -60,7 +65,23 @@ import {
   requireSetShortId,
 } from './views/dashboard-panel';
 import { shortTitle, deriveShortTitle } from './short-title';
-import { WorkspaceManager } from './workspace-manager';
+import { WorkspaceManager, detectSharedWorkspaceRoot } from './workspace-manager';
+import {
+  ProjectResolver,
+  ProjectInfo,
+  getProjectResolver,
+  invalidateProjectResolver,
+  sanitizeSlug,
+  isGitIgnored,
+  computeTreeHash,
+  canonicalizeTaskState,
+  countTasksByCanonicalState,
+  fastCountQuestions,
+  fastCountInbox,
+  UnknownProjectError,
+  ProjectRequiredError,
+  OutsideWorkspaceError,
+} from './project-resolver';
 import {
   QuestionNotifier,
   diffQuestions,
@@ -82,6 +103,9 @@ export {
   HANDLER_MAP,
   CLI_COMMAND_MAP,
   CUSTOM_HANDLERS,
+  AGGREGATE_OR_GLOBAL_TYPES,
+  resolveMessageTargetRoot,
+  dispatchMessage,
   NOTE_ID_RE,
   requireNoteId,
   requireAttachmentName,
@@ -123,9 +147,11 @@ export {
   TaskTreeItem,
   InitiativeTreeItem,
   DecisionTreeItem,
+  ProjectGroupTreeItem,
   DecisionsTreeProvider,
   DecisionGroupTreeItem,
   DecisionQuestionTreeItem,
+  DecisionProjectTreeItem,
   getDecisionsTreeData,
   getBlockedTaskIds,
   groupOpenQuestions,
@@ -146,12 +172,28 @@ export {
   setShortArgs,
   SET_SHORT_ID_RE,
   requireSetShortId,
+  WorkspaceManager,
+  detectSharedWorkspaceRoot,
+  ProjectResolver,
+  ProjectInfo,
+  getProjectResolver,
+  invalidateProjectResolver,
+  sanitizeSlug,
+  isGitIgnored,
+  computeTreeHash,
+  canonicalizeTaskState,
+  countTasksByCanonicalState,
+  fastCountQuestions,
+  fastCountInbox,
+  UnknownProjectError,
+  ProjectRequiredError,
+  OutsideWorkspaceError,
 };
 
 export function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel('AI Orchestration');
   const cliClient = new CliClient(outputChannel);
-  const workspaceManager = new WorkspaceManager(context);
+  const workspaceManager = new WorkspaceManager(context, (root) => cliClient.resolveCliPath(root));
 
   // Status Bar Item
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
@@ -163,12 +205,13 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Tree View Providers (bound to current workspace folder)
   const getBoundRoot = () => workspaceManager.getBoundWorkspaceFolder();
+  const getSelectedProject = () => workspaceManager.getSelectedProject();
   const questionNotifier = new QuestionNotifier(context, cliClient, getBoundRoot);
   context.subscriptions.push(questionNotifier);
 
-  const eventWatcher = new EventWatcher(context, cliClient, getBoundRoot, (events, areas) => {
+  const eventWatcher = new EventWatcher(context, cliClient, getBoundRoot, (events, areas, project) => {
     if (DashboardPanel.currentPanel) {
-      DashboardPanel.currentPanel.notifyAreasChanged(areas);
+      DashboardPanel.currentPanel.notifyAreasChanged(areas, project);
     }
     if (areas.includes('tasks')) {
       nextUpProvider.refresh();
@@ -183,12 +226,17 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(eventWatcher);
 
-  const nextUpProvider = new TaskTreeProvider(cliClient, 'nextUp', getBoundRoot);
-  const initiativesProvider = new TaskTreeProvider(cliClient, 'initiatives', getBoundRoot);
-  const useCasesProvider = new TaskTreeProvider(cliClient, 'useCases', getBoundRoot);
-  const decisionsProvider = new DecisionsTreeProvider(cliClient, getBoundRoot, () => {
-    questionNotifier.checkQuestions(false);
-  });
+  const nextUpProvider = new TaskTreeProvider(cliClient, 'nextUp', getBoundRoot, getSelectedProject);
+  const initiativesProvider = new TaskTreeProvider(cliClient, 'initiatives', getBoundRoot, getSelectedProject);
+  const useCasesProvider = new TaskTreeProvider(cliClient, 'useCases', getBoundRoot, getSelectedProject);
+  const decisionsProvider = new DecisionsTreeProvider(
+    cliClient,
+    getBoundRoot,
+    () => {
+      questionNotifier.checkQuestions(false);
+    },
+    getSelectedProject
+  );
 
   const decisionsTreeView = vscode.window.createTreeView('aiOrchestration.decisionsView', {
     treeDataProvider: decisionsProvider,
@@ -205,23 +253,23 @@ export function activate(context: vscode.ExtensionContext) {
   // Every trigger (watchers, commands, dashboard writes) goes through one debounced refresh,
   // so a burst of file events costs one round of CLI calls.
   let refreshTimer: NodeJS.Timeout | null = null;
-  const refreshAll = () => {
+  const refreshAll = (project?: string) => {
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
-      refreshAllNow();
+      refreshAllNow(project);
     }, 300);
   };
   context.subscriptions.push(new vscode.Disposable(() => refreshTimer && clearTimeout(refreshTimer)));
 
-  const refreshAllNow = () => {
+  const refreshAllNow = (project?: string) => {
     nextUpProvider.refresh();
     initiativesProvider.refresh();
     useCasesProvider.refresh();
     decisionsProvider.refresh();
     if (DashboardPanel.currentPanel) {
-      DashboardPanel.currentPanel.notifyTasksChanged();
-      DashboardPanel.currentPanel.notifyQuestionsChanged();
+      DashboardPanel.currentPanel.notifyTasksChanged(project);
+      DashboardPanel.currentPanel.notifyQuestionsChanged(project);
     }
     updateStatusBarCount();
     questionNotifier.checkQuestions(false);
@@ -231,6 +279,26 @@ export function activate(context: vscode.ExtensionContext) {
     const root = workspaceManager.getBoundWorkspaceFolder();
     if (!root || !fs.existsSync(root)) return;
     try {
+      const aiOrchBin = cliClient.resolveCliPath(root);
+      const resolver = getProjectResolver(root, aiOrchBin);
+      const projects = resolver.getProjects();
+      if (projects.length > 1) {
+        const counts = await Promise.all(
+          projects.map(async (p) => {
+            if (!fs.existsSync(p.tasksDir)) return 0;
+            try {
+              const res = await cliClient.listTasks(p.root);
+              return (res.emergent_tasks || []).filter((t) => t.state !== 'done').length;
+            } catch {
+              return 0;
+            }
+          })
+        );
+        const totalActive = counts.reduce((a, b) => a + b, 0);
+        statusBarItem.text = `$(layers) AI Tasks: ${totalActive}`;
+        return;
+      }
+
       const res = await cliClient.listTasks(root);
       const active = (res.emergent_tasks || []).filter((t) => t.state !== 'done').length;
       statusBarItem.text = `$(layers) AI Tasks: ${active}`;
@@ -248,11 +316,19 @@ export function activate(context: vscode.ExtensionContext) {
 
       let boundRoot: string;
       if (folders.length > 1) {
-        const picked = await workspaceManager.pickWorkspaceFolder();
-        if (!picked) {
-          return;
+        const folderPaths = folders.map((f) => f.uri.fsPath);
+        const bin = cliClient.resolveCliPath(folderPaths[0]);
+        const sharedRoot = detectSharedWorkspaceRoot(folderPaths, bin);
+        if (sharedRoot) {
+          boundRoot = sharedRoot;
+          await workspaceManager.setBoundWorkspaceFolder(boundRoot);
+        } else {
+          const picked = await workspaceManager.pickWorkspaceFolder();
+          if (!picked) {
+            return;
+          }
+          boundRoot = picked;
         }
-        boundRoot = picked;
       } else {
         boundRoot = folders[0].uri.fsPath;
         await workspaceManager.setBoundWorkspaceFolder(boundRoot);
@@ -283,6 +359,47 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
 
+    vscode.commands.registerCommand('aiOrchestration.selectProject', async (projectArg?: string | null) => {
+      const root = workspaceManager.getBoundWorkspaceFolder();
+      if (!root || !fs.existsSync(root)) return;
+
+      if (projectArg !== undefined) {
+        const nextVal = projectArg === 'all' || projectArg === '' ? null : projectArg;
+        await workspaceManager.setSelectedProject(nextVal);
+        refreshAll();
+        return;
+      }
+
+      const aiOrchBin = cliClient.resolveCliPath(root);
+      const resolver = getProjectResolver(root, aiOrchBin);
+      const projects = resolver.getProjects();
+      const current = workspaceManager.getSelectedProject();
+
+      const items: Array<{ label: string; description?: string; detail?: string; projectId: string | null }> = [
+        {
+          label: 'All projects',
+          description: 'Common workspace view',
+          detail: !current ? '(Currently selected)' : undefined,
+          projectId: null,
+        },
+        ...projects.map((p) => ({
+          label: p.id,
+          description: p.path,
+          detail: current === p.id ? '(Currently selected)' : undefined,
+          projectId: p.id,
+        })),
+      ];
+
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Filter tree views by project',
+        title: 'AI Orchestration: Select Project',
+      });
+
+      if (!picked) return;
+      await workspaceManager.setSelectedProject(picked.projectId);
+      refreshAll();
+    }),
+
     vscode.commands.registerCommand('aiOrchestration.openDecision', async (questionId?: string) => {
       await vscode.commands.executeCommand('aiOrchestration.openDashboard', {
         tab: 'decisions',
@@ -297,6 +414,10 @@ export function activate(context: vscode.ExtensionContext) {
     }),
 
     vscode.commands.registerCommand('aiOrchestration.refresh', () => {
+      const root = workspaceManager.getBoundWorkspaceFolder();
+      if (root) {
+        invalidateProjectResolver(root);
+      }
       refreshAll();
     }),
 
@@ -307,7 +428,18 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       try {
-        await cliClient.syncIndex(root);
+        const selectedProj = workspaceManager.getSelectedProject();
+        const aiOrchBin = cliClient.resolveCliPath(root);
+        const resolver = getProjectResolver(root, aiOrchBin);
+        const projects = resolver.getProjects();
+        let targetRoot = root;
+        if (projects.length === 1) {
+          targetRoot = projects[0].root;
+        } else if (selectedProj) {
+          const found = projects.find((p) => p.id === selectedProj);
+          if (found) targetRoot = found.root;
+        }
+        await cliClient.syncIndex(targetRoot);
         vscode.window.showInformationMessage('00-INDEX.md synchronized successfully');
         refreshAll();
       } catch (err: any) {
@@ -346,7 +478,7 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // File System Watchers on tasks/ and tasks/questions/** for bound folder
+  // File System Watchers on tasks/ and tasks/questions/** for bound folder and its projects
   let activeWatchers: vscode.Disposable[] = [];
   const setupWatcherForBoundFolder = () => {
     while (activeWatchers.length) {
@@ -357,42 +489,73 @@ export function activate(context: vscode.ExtensionContext) {
     if (bound && fs.existsSync(bound)) {
       eventWatcher.bindFolder(bound);
 
-      // File watchers stay on even with the event stream: hand edits and git pulls emit no events.
+      const aiOrchBin = cliClient.resolveCliPath(bound);
+      const resolver = getProjectResolver(bound, aiOrchBin);
+      let projects = resolver.getProjects();
+      if (!projects || projects.length === 0) {
+        projects = [
+          {
+            id: '_workspace',
+            path: '.',
+            kind: 'project',
+            root: bound,
+            tasksDir: path.join(bound, 'tasks'),
+          },
+        ];
+      }
 
-      const tasksWatcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(bound, 'tasks/**/*.{md,toml}')
+      const indexWatcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(bound, '**/tasks/00-INDEX.md')
       );
-      tasksWatcher.onDidChange(() => refreshAll());
-      tasksWatcher.onDidCreate(() => refreshAll());
-      tasksWatcher.onDidDelete(() => refreshAll());
-
-      const questionsWatcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(bound, 'tasks/questions/**')
-      );
-      let questionsDebounceTimer: NodeJS.Timeout | null = null;
-      const onQuestionsChangedDebounced = () => {
-        if (questionsDebounceTimer) {
-          clearTimeout(questionsDebounceTimer);
-        }
-        questionsDebounceTimer = setTimeout(() => {
-          questionsDebounceTimer = null;
-          refreshAll();
-        }, 500);
+      const onIndexChange = () => {
+        invalidateProjectResolver(bound);
+        refreshAll();
       };
-      questionsWatcher.onDidChange(onQuestionsChangedDebounced);
-      questionsWatcher.onDidCreate(onQuestionsChangedDebounced);
-      questionsWatcher.onDidDelete(onQuestionsChangedDebounced);
+      indexWatcher.onDidChange(onIndexChange);
+      indexWatcher.onDidCreate(onIndexChange);
+      indexWatcher.onDidDelete(onIndexChange);
+      activeWatchers.push(indexWatcher);
 
-      activeWatchers.push(
-        tasksWatcher,
-        questionsWatcher,
-        new vscode.Disposable(() => {
+      // File watchers stay on even with the event stream: hand edits and git pulls emit no events.
+      for (const proj of projects) {
+        const pRoot = proj.root;
+        const pId = proj.id;
+
+        const tasksWatcher = vscode.workspace.createFileSystemWatcher(
+          new vscode.RelativePattern(pRoot, 'tasks/**/*.{md,toml}')
+        );
+        tasksWatcher.onDidChange(() => refreshAll(pId));
+        tasksWatcher.onDidCreate(() => refreshAll(pId));
+        tasksWatcher.onDidDelete(() => refreshAll(pId));
+
+        const questionsWatcher = vscode.workspace.createFileSystemWatcher(
+          new vscode.RelativePattern(pRoot, 'tasks/questions/**')
+        );
+        let questionsDebounceTimer: NodeJS.Timeout | null = null;
+        const onQuestionsChangedDebounced = () => {
           if (questionsDebounceTimer) {
             clearTimeout(questionsDebounceTimer);
-            questionsDebounceTimer = null;
           }
-        })
-      );
+          questionsDebounceTimer = setTimeout(() => {
+            questionsDebounceTimer = null;
+            refreshAll(pId);
+          }, 500);
+        };
+        questionsWatcher.onDidChange(onQuestionsChangedDebounced);
+        questionsWatcher.onDidCreate(onQuestionsChangedDebounced);
+        questionsWatcher.onDidDelete(onQuestionsChangedDebounced);
+
+        activeWatchers.push(
+          tasksWatcher,
+          questionsWatcher,
+          new vscode.Disposable(() => {
+            if (questionsDebounceTimer) {
+              clearTimeout(questionsDebounceTimer);
+              questionsDebounceTimer = null;
+            }
+          })
+        );
+      }
     }
   };
   setupWatcherForBoundFolder();
