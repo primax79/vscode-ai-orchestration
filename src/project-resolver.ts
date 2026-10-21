@@ -783,9 +783,11 @@ print(json.dumps({"ws_uuid": ws_uuid, "projects": proj_rows, "other_ws": other_w
           continue;
         }
 
-        const hasIndex = fs.existsSync(path.join(folderP, 'tasks', '00-INDEX.md'));
-        const hasTasksDir = fs.existsSync(path.join(folderP, 'tasks')) && fs.statSync(path.join(folderP, 'tasks')).isDirectory();
-        if (hasIndex || hasTasksDir) {
+        const hasIndex =
+          fs.existsSync(path.join(folderP, 'tasks', '00-INDEX.md')) ||
+          fs.existsSync(path.join(folderP, 'tasks', 'AGENTS.md')) ||
+          fs.existsSync(path.join(folderP, 'tasks', 'CONTEXT.md'));
+        if (hasIndex) {
           candidateFolders.push(folderP);
         }
 

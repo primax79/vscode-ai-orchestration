@@ -374,16 +374,45 @@ export function activate(context: vscode.ExtensionContext) {
       const resolver = getProjectResolver(root, aiOrchBin);
       const projects = resolver.getProjects();
       const current = workspaceManager.getSelectedProject();
+      const runCli = (args: string[], cwd?: string) => cliClient.runJsonCommand<any>(args, cwd || root);
+      const projectCounts = await Promise.all(projects.map((p) => resolver.getProjectCounts(p, runCli)));
+      const getProjStats = (c?: Record<string, number>) => {
+        const counts = c || {};
+        const waiting = (counts.waiting || 0) + (counts.blocked || 0) + (counts.paused || 0);
+        const open = (counts.open || 0) + (counts.todo || 0) + (counts.bounced || 0);
+        const progress = (counts['in progress'] || 0) + (counts.in_progress || 0) + (counts.delivered || 0) + (counts.verified || 0);
+        const nonClosed = waiting + open + progress;
+        return { waiting, open, progress, nonClosed };
+      };
+      const projWithStats = projects.map((p, idx) => ({ p, stats: getProjStats(projectCounts[idx]) }));
+      const totals = projWithStats.reduce(
+        (acc, x) => {
+          acc.waiting += x.stats.waiting;
+          acc.open += x.stats.open;
+          acc.progress += x.stats.progress;
+          acc.nonClosed += x.stats.nonClosed;
+          return acc;
+        },
+        { waiting: 0, open: 0, progress: 0, nonClosed: 0 }
+      );
+      projWithStats.sort((a, b) => {
+        if (a.p.kind === '_workspace' && b.p.kind !== '_workspace') return -1;
+        if (b.p.kind === '_workspace' && a.p.kind !== '_workspace') return 1;
+        if (a.stats.nonClosed > 0 && b.stats.nonClosed === 0) return -1;
+        if (b.stats.nonClosed > 0 && a.stats.nonClosed === 0) return 1;
+        if (a.stats.nonClosed !== b.stats.nonClosed) return b.stats.nonClosed - a.stats.nonClosed;
+        return a.p.id.localeCompare(b.p.id);
+      });
 
       const items: Array<{ label: string; description?: string; detail?: string; projectId: string | null }> = [
         {
-          label: 'All projects',
+          label: `All projects (${projects.length}) — ${totals.nonClosed} (waiting: ${totals.waiting}, open: ${totals.open}, progress: ${totals.progress})`,
           description: 'Common workspace view',
           detail: !current ? '(Currently selected)' : undefined,
           projectId: null,
         },
-        ...projects.map((p) => ({
-          label: p.id,
+        ...projWithStats.map(({ p, stats }) => ({
+          label: `${p.id} — ${stats.nonClosed} (waiting: ${stats.waiting}, open: ${stats.open}, progress: ${stats.progress})`,
           description: p.path,
           detail: current === p.id ? '(Currently selected)' : undefined,
           projectId: p.id,
