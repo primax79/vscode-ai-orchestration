@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as assert from 'assert';
+import { execFileSync } from 'child_process';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
@@ -412,6 +413,54 @@ async function runMultiProjectTests() {
     const shared = detectSharedWorkspaceRoot([alphaRoot, betaRoot]);
     assert.strictEqual(shared, fs.realpathSync(tmpRoot));
     console.log('PASS: Test 5 (Tree views & multi-root shared parent detection)');
+
+    // 6. Test T049 discovery hygiene: git-ignored nested repos, symlinks, and .ai-orchestration/projects-ignore
+    console.log('Test 6: T049 discovery hygiene & projects-ignore');
+    const writeTaskTree = (projRoot) => {
+      fs.mkdirSync(path.join(projRoot, 'tasks'), { recursive: true });
+      fs.writeFileSync(path.join(projRoot, 'tasks', '00-INDEX.md'), '# Index\n', 'utf-8');
+    };
+    execFileSync('git', ['init', '-q'], { cwd: tmpRoot });
+    fs.writeFileSync(path.join(tmpRoot, '.gitignore'), '/ansible-playbooks/\nsecurity_audit/\n', 'utf-8');
+
+    // Git-ignored nested repo with both Ansible role tasks/ and a real tasks/00-INDEX.md
+    const ansRoot = path.join(tmpRoot, 'ansible-playbooks');
+    fs.mkdirSync(path.join(ansRoot, 'roles', '389ds_backup', 'tasks'), { recursive: true });
+    fs.writeFileSync(path.join(ansRoot, 'roles', '389ds_backup', 'tasks', 'main.yml'), '---\n', 'utf-8');
+    execFileSync('git', ['init', '-q'], { cwd: ansRoot });
+    writeTaskTree(path.join(ansRoot, 'nested-ignored'), [{ id: 'T001', title: 'Ignored', state: 'open' }]);
+
+    // Symlink to external folder with tasks/00-INDEX.md
+    const extRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-orch-ext-'));
+    try {
+      writeTaskTree(extRoot, [{ id: 'T001', title: 'External', state: 'open' }]);
+      fs.symlinkSync(extRoot, path.join(tmpRoot, 'libs-jdk17'));
+
+      // Subtree and portlet projects
+      writeTaskTree(path.join(tmpRoot, 'source_codes', 'courses'), [{ id: 'T001', title: 'Courses', state: 'open' }]);
+      writeTaskTree(path.join(tmpRoot, 'modules', 'portal-accept-invite-portlet'), [{ id: 'T001', title: 'Invite', state: 'open' }]);
+      writeTaskTree(path.join(tmpRoot, 'modules', 'portal-messages-portlet'), [{ id: 'T001', title: 'Messages', state: 'open' }]);
+
+      // Write .ai-orchestration/projects-ignore (subtree + slug glob + !negation)
+      fs.mkdirSync(path.join(tmpRoot, '.ai-orchestration'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpRoot, '.ai-orchestration', 'projects-ignore'),
+        'source_codes/\nportal-*-portlet\n!portal-messages-portlet\n',
+        'utf-8'
+      );
+
+      // Should auto-invalidate resolver cache because .gitignore and projects-ignore changed
+      const projsAfterIgnore = resolver.getProjects().map((p) => p.id);
+      assert.ok(!projsAfterIgnore.includes('389ds-backup'), 'Must not include Ansible role');
+      assert.ok(!projsAfterIgnore.includes('nested-ignored'), 'Must not descend into git-ignored nested repo');
+      assert.ok(!projsAfterIgnore.includes('libs-jdk17'), 'Must not follow symlinks');
+      assert.ok(!projsAfterIgnore.includes('courses'), 'Must ignore source_codes/ subtree');
+      assert.ok(!projsAfterIgnore.includes('portal-accept-invite-portlet'), 'Must ignore matching portlet glob');
+      assert.ok(projsAfterIgnore.includes('portal-messages-portlet'), 'Must keep negated portlet');
+      console.log('PASS: Test 6 (T049 discovery hygiene & projects-ignore)');
+    } finally {
+      fs.rmSync(extRoot, { recursive: true, force: true });
+    }
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }

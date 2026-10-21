@@ -98,28 +98,289 @@ export function findGitRepoRoot(targetPath: string): string | null {
   return null;
 }
 
-export function isGitIgnored(targetPath: string, _wsPath?: string): boolean {
-  try {
-    const absTarget = path.resolve(targetPath);
-    if (fs.existsSync(path.join(absTarget, '.git'))) {
-      return false;
-    }
-    const repo = findGitRepoRoot(absTarget);
-    if (!repo) {
-      return false;
-    }
-    const rel = path.relative(repo, absTarget);
-    if (!rel) {
-      return false;
-    }
+function checkGitIgnoreInRepo(repo: string, absTarget: string, isNestedRepo: boolean): boolean {
+  const rel = path.relative(repo, absTarget);
+  if (!rel || rel === '.' || rel.startsWith('..')) {
+    return false;
+  }
+  if (!isNestedRepo) {
     const proc = spawnSync('git', ['check-ignore', '-q', rel], {
       cwd: repo,
       stdio: 'ignore',
     });
     return proc.status === 0;
+  }
+  const proc = spawnSync('git', ['check-ignore', '-v', rel], {
+    cwd: repo,
+    encoding: 'utf-8',
+  });
+  if (proc.status !== 0) {
+    return false;
+  }
+  const lines = String(proc.stdout || '').split(/\r?\n/);
+  for (const line of lines) {
+    if (!line) continue;
+    const tabPart = line.split('\t')[0] || '';
+    const parts = tabPart.split(':');
+    if (parts.length >= 3) {
+      const pattern = parts.slice(2).join(':').trim();
+      if (pattern === '*' || pattern === '/*') {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+export function isGitIgnored(targetPath: string, wsPath?: string): boolean {
+  try {
+    const absTarget = path.resolve(targetPath);
+    const hasOwnGit = fs.existsSync(path.join(absTarget, '.git'));
+    const wsRepo = wsPath ? findGitRepoRoot(path.resolve(wsPath)) : null;
+    const parentRepo = hasOwnGit
+      ? findGitRepoRoot(path.dirname(absTarget))
+      : findGitRepoRoot(absTarget);
+
+    const reposToCheck: string[] = [];
+    if (wsRepo) {
+      reposToCheck.push(wsRepo);
+    }
+    if (parentRepo && !reposToCheck.includes(parentRepo)) {
+      reposToCheck.push(parentRepo);
+    }
+
+    for (const repo of reposToCheck) {
+      if (checkGitIgnoreInRepo(repo, absTarget, hasOwnGit && repo !== absTarget)) {
+        return true;
+      }
+    }
+    return false;
   } catch {
     return false;
   }
+}
+
+function globToRegExp(glob: string): RegExp {
+  let re = '^';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      re += '.*';
+    } else if (c === '?') {
+      re += '.';
+    } else if ('\\^$+.()|{}[]'.includes(c)) {
+      re += '\\' + c;
+    } else {
+      re += c;
+    }
+  }
+  re += '$';
+  return new RegExp(re);
+}
+
+function fnmatchCase(str: string, pat: string): boolean {
+  return globToRegExp(pat).test(str);
+}
+
+export function matchIgnorePattern(relPosix: string, name: string, slug: string, rawPat: string): boolean {
+  let pat = rawPat.trim();
+  if (!pat) return false;
+  while (pat.startsWith('./')) {
+    pat = pat.slice(2);
+  }
+  const anchored = pat.startsWith('/');
+  if (anchored) {
+    pat = pat.replace(/^\/+/, '');
+  }
+  const dirOnly = pat.endsWith('/');
+  if (dirOnly) {
+    pat = pat.replace(/\/+$/, '');
+  }
+  if (!pat) return false;
+
+  const relNorm = relPosix.replace(/^\/+|\/+$/g, '');
+  if (!relNorm || relNorm === '.') return false;
+
+  const hasSlash = pat.includes('/');
+  if (hasSlash || anchored || dirOnly) {
+    if (relNorm === pat || relNorm.startsWith(pat + '/')) {
+      return true;
+    }
+    if (fnmatchCase(relNorm, pat) || fnmatchCase(relNorm, pat + '/*')) {
+      return true;
+    }
+    const parts = relNorm.split('/');
+    for (let i = 1; i <= parts.length; i++) {
+      const prefix = parts.slice(0, i).join('/');
+      if (fnmatchCase(prefix, pat)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (fnmatchCase(name, pat) || fnmatchCase(slug, pat)) {
+    return true;
+  }
+  for (const part of relNorm.split('/')) {
+    if (fnmatchCase(part, pat) || fnmatchCase(sanitizeSlug(part), pat)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export class WorkspaceDiscoveryFilter {
+  public readonly includePatterns: string[];
+  public readonly ignoreRules: Array<{ pattern: string; negated: boolean }>;
+  public readonly hasNegations: boolean;
+
+  constructor(
+    includePatterns: string[] = [],
+    ignoreRules: Array<{ pattern: string; negated: boolean }> = []
+  ) {
+    this.includePatterns = includePatterns.map((p) => p.trim()).filter(Boolean);
+    this.ignoreRules = ignoreRules;
+    this.hasNegations = ignoreRules.some((r) => r.negated);
+  }
+
+  public isExcluded(relPosix: string, name: string, slug: string): boolean {
+    let excluded = false;
+    for (const rule of this.ignoreRules) {
+      if (matchIgnorePattern(relPosix, name, slug, rule.pattern)) {
+        excluded = !rule.negated;
+      }
+    }
+    return excluded;
+  }
+
+  public canPruneDir(relPosix: string, dirName: string): boolean {
+    if (this.hasNegations) return false;
+    return this.isExcluded(relPosix, dirName, sanitizeSlug(dirName));
+  }
+
+  public allowsProject(relPosix: string, name: string, slug: string): boolean {
+    if (!relPosix || relPosix === '.') {
+      return !this.isExcluded('.', '_workspace', '_workspace');
+    }
+    if (this.isExcluded(relPosix, name, slug)) {
+      return false;
+    }
+    if (this.includePatterns.length > 0) {
+      return this.includePatterns.some((inc) => matchIgnorePattern(relPosix, name, slug, inc));
+    }
+    return true;
+  }
+}
+
+function parseTomlDiscoverySection(tomlText: string): { include: string[]; exclude: string[] } {
+  const include: string[] = [];
+  const exclude: string[] = [];
+  const lines = tomlText.split(/\r?\n/);
+  let inSection = false;
+  let activeKey: 'include' | 'exclude' | null = null;
+  let arrayBuf = '';
+
+  const flushArray = (key: 'include' | 'exclude', raw: string) => {
+    const matches = raw.matchAll(/"([^"]*)"|'([^']*)'/g);
+    for (const m of matches) {
+      const val = (m[1] ?? m[2] ?? '').trim();
+      if (val) {
+        if (key === 'include') include.push(val);
+        else exclude.push(val);
+      }
+    }
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/#.*$/, '').trim();
+    if (!line) continue;
+    if (line.startsWith('[')) {
+      inSection = line === '[workspace.discovery]';
+      activeKey = null;
+      arrayBuf = '';
+      continue;
+    }
+    if (!inSection) continue;
+
+    if (activeKey) {
+      arrayBuf += ' ' + line;
+      if (line.includes(']')) {
+        flushArray(activeKey, arrayBuf);
+        activeKey = null;
+        arrayBuf = '';
+      }
+      continue;
+    }
+
+    const m = line.match(/^(include|exclude|ignore)\s*=\s*(.*)$/);
+    if (m) {
+      const k: 'include' | 'exclude' = m[1] === 'include' ? 'include' : 'exclude';
+      const rhs = m[2].trim();
+      if (rhs.startsWith('[')) {
+        if (rhs.includes(']')) {
+          flushArray(k, rhs);
+        } else {
+          activeKey = k;
+          arrayBuf = rhs;
+        }
+      }
+    }
+  }
+  return { include, exclude };
+}
+
+export function loadWorkspaceDiscoveryFilter(wsPath: string): WorkspaceDiscoveryFilter {
+  const includePatterns: string[] = [];
+  const ignoreRules: Array<{ pattern: string; negated: boolean }> = [];
+
+  const tomlCandidates = [
+    path.join(wsPath, 'orchestration.toml'),
+    path.join(wsPath, '.ai-orchestration', 'orchestration.toml'),
+    path.join(wsPath, '.ai-orchestration.local.toml'),
+  ];
+  for (const cand of tomlCandidates) {
+    try {
+      if (fs.existsSync(cand) && !fs.lstatSync(cand).isSymbolicLink() && fs.statSync(cand).isFile()) {
+        const parsed = parseTomlDiscoverySection(fs.readFileSync(cand, 'utf-8'));
+        includePatterns.push(...parsed.include);
+        for (const raw of parsed.exclude) {
+          const s = raw.trim();
+          if (!s || s.startsWith('#')) continue;
+          if (s.startsWith('!')) {
+            const p = s.slice(1).trim();
+            if (p) ignoreRules.push({ pattern: p, negated: true });
+          } else {
+            ignoreRules.push({ pattern: s, negated: false });
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const ignoreFiles = [
+    path.join(wsPath, '.ai-orchestration', 'projects-ignore'),
+    path.join(wsPath, '.ai-orchignore'),
+  ];
+  for (const ign of ignoreFiles) {
+    try {
+      if (fs.existsSync(ign) && !fs.lstatSync(ign).isSymbolicLink() && fs.statSync(ign).isFile()) {
+        const lines = fs.readFileSync(ign, 'utf-8').split(/\r?\n/);
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line || line.startsWith('#')) continue;
+          if (line.startsWith('!')) {
+            const p = line.slice(1).trim();
+            if (p) ignoreRules.push({ pattern: p, negated: true });
+          } else {
+            ignoreRules.push({ pattern: line, negated: false });
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return new WorkspaceDiscoveryFilter(includePatterns, ignoreRules);
 }
 
 export function computeTreeHash(tasksDir: string): string {
@@ -323,6 +584,7 @@ export class ProjectResolver {
   public aiOrchBin?: string | null;
 
   private _cachedWsPath: string | null = null;
+  private _cachedSig: string | null = null;
   private _cachedMode: 'registered' | 'discovered' | 'single' = 'single';
   private _cachedProjects: ProjectInfo[] = [];
   private _cachedSubWorkspaces: SubWorkspaceInfo[] = [];
@@ -352,6 +614,7 @@ export class ProjectResolver {
 
   public invalidate(): void {
     this._cachedWsPath = null;
+    this._cachedSig = null;
     this._cachedProjects = [];
     this._cachedSubWorkspaces = [];
     this._tasksCache.clear();
@@ -359,8 +622,34 @@ export class ProjectResolver {
   }
 
   public invalidateTasksCache(): void {
+    this._cachedWsPath = null;
+    this._cachedSig = null;
     this._tasksCache.clear();
     this._countsCache.clear();
+  }
+
+  private _computeDiscoverySig(): string {
+    const wsPath = this.workspace;
+    const files = [
+      wsPath,
+      path.join(wsPath, '.gitignore'),
+      path.join(wsPath, 'orchestration.toml'),
+      path.join(wsPath, '.ai-orchestration', 'orchestration.toml'),
+      path.join(wsPath, '.ai-orchestration.local.toml'),
+      path.join(wsPath, '.ai-orchestration', 'projects-ignore'),
+      path.join(wsPath, '.ai-orchignore'),
+      resolveRegistryDbPath(this.configDir),
+    ];
+    const parts: string[] = [wsPath];
+    for (const f of files) {
+      try {
+        const st = fs.lstatSync(f);
+        parts.push(`${path.basename(f)}:${st.mtimeMs}:${st.size}`);
+      } catch {
+        parts.push(`${path.basename(f)}:0`);
+      }
+    }
+    return parts.join('|');
   }
 
   public getWorkspaceInfo(): {
@@ -368,7 +657,12 @@ export class ProjectResolver {
     projects: ProjectInfo[];
     subWorkspaces: SubWorkspaceInfo[];
   } {
-    if (this._cachedWsPath === this.workspace && this._cachedProjects.length > 0) {
+    const sig = this._computeDiscoverySig();
+    if (
+      this._cachedWsPath === this.workspace &&
+      this._cachedSig === sig &&
+      this._cachedProjects.length > 0
+    ) {
       return {
         mode: this._cachedMode,
         projects: [...this._cachedProjects],
@@ -378,6 +672,7 @@ export class ProjectResolver {
 
     const { mode, projects, subWorkspaces } = this._resolveWorkspace();
     this._cachedWsPath = this.workspace;
+    this._cachedSig = sig;
     this._cachedMode = mode;
     this._cachedProjects = projects;
     this._cachedSubWorkspaces = subWorkspaces;
@@ -555,11 +850,29 @@ export class ProjectResolver {
     return false;
   }
 
+  private _hasRootTaskIndex(wsPath: string): boolean {
+    try {
+      const tDir = path.join(wsPath, 'tasks');
+      const idx = path.join(tDir, '00-INDEX.md');
+      if (
+        fs.existsSync(tDir) &&
+        !fs.lstatSync(tDir).isSymbolicLink() &&
+        fs.existsSync(idx) &&
+        !fs.lstatSync(idx).isSymbolicLink() &&
+        fs.statSync(idx).isFile()
+      ) {
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
   private _tryRegisteredWorkspace(wsPath: string): {
     mode: 'registered';
     projects: ProjectInfo[];
     subWorkspaces: SubWorkspaceInfo[];
   } | null {
+    const discFilter = loadWorkspaceDiscoveryFilter(wsPath);
     // 1a. Try CLI: ai-orch workspace show <root> --json or ai-orch projects list <root> --json
     if (this.aiOrchBin && fs.existsSync(this.aiOrchBin)) {
       const cfgDir = resolveRegistryConfigDir(this.configDir);
@@ -612,6 +925,11 @@ export class ProjectResolver {
                 const kind: ProjectKind = item.kind || 'project';
                 const slug = String(item.slug || item.id);
                 const relP = item.path || '.';
+                const relPosix = String(relP).replace(/\\/g, '/');
+                const nameP = slug === '_workspace' ? '_workspace' : path.posix.basename(relPosix);
+                if (!discFilter.allowsProject(relPosix, nameP, slug)) {
+                  continue;
+                }
                 const pRoot = path.resolve(wsPath, relP);
                 if (kind === 'sub_workspace') {
                   subWorkspaces.push({
@@ -643,7 +961,11 @@ export class ProjectResolver {
                 }
               }
 
-              if (!hasWorkspaceSlug && this._hasRootTasks(wsPath)) {
+              if (
+                !hasWorkspaceSlug &&
+                discFilter.allowsProject('.', '_workspace', '_workspace') &&
+                this._hasRootTasks(wsPath)
+              ) {
                 projects.unshift({
                   id: '_workspace',
                   path: '.',
@@ -692,6 +1014,11 @@ print(json.dumps({"ws_uuid": ws_uuid, "projects": proj_rows, "other_ws": other_w
           for (const pr of parsed.projects || []) {
             const slug = String(pr.slug);
             const relP = pr.rel_path || '.';
+            const relPosix = String(relP).replace(/\\/g, '/');
+            const nameP = slug === '_workspace' ? '_workspace' : path.posix.basename(relPosix);
+            if (!discFilter.allowsProject(relPosix, nameP, slug)) {
+              continue;
+            }
             const pRoot = path.resolve(wsPath, relP);
             const kind: ProjectKind = slug === '_workspace' ? '_workspace' : 'project';
             if (slug === '_workspace') {
@@ -707,7 +1034,11 @@ print(json.dumps({"ws_uuid": ws_uuid, "projects": proj_rows, "other_ws": other_w
             });
           }
 
-          if (!hasWorkspaceSlug && this._hasRootTasks(wsPath)) {
+          if (
+            !hasWorkspaceSlug &&
+            discFilter.allowsProject('.', '_workspace', '_workspace') &&
+            this._hasRootTasks(wsPath)
+          ) {
             projects.unshift({
               id: '_workspace',
               path: '.',
@@ -724,6 +1055,9 @@ print(json.dumps({"ws_uuid": ws_uuid, "projects": proj_rows, "other_ws": other_w
               : path.resolve(ow.canonical_path);
             const rel = path.relative(wsPath, owPath).replace(/\\/g, '/');
             if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+              if (!discFilter.allowsProject(rel, path.basename(owPath), String(ow.slug))) {
+                continue;
+              }
               subWorkspaces.push({
                 uuid: ow.uuid ?? null,
                 slug: ow.slug,
@@ -755,8 +1089,12 @@ print(json.dumps({"ws_uuid": ws_uuid, "projects": proj_rows, "other_ws": other_w
     subWorkspaces: SubWorkspaceInfo[];
   } | null {
     const candidateFolders: string[] = [];
+    const discFilter = loadWorkspaceDiscoveryFilter(wsPath);
 
-    if (this._hasRootTasks(wsPath)) {
+    if (
+      this._hasRootTaskIndex(wsPath) &&
+      discFilter.allowsProject('.', '_workspace', '_workspace')
+    ) {
       candidateFolders.push(wsPath);
     }
 
@@ -769,11 +1107,19 @@ print(json.dumps({"ws_uuid": ws_uuid, "projects": proj_rows, "other_ws": other_w
       }
 
       for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
+        if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
         const d = entry.name;
         if (d.startsWith('.') || EXCLUDE_DIR_NAMES.has(d)) continue;
 
         const folderP = path.resolve(dir, d);
+        try {
+          if (fs.lstatSync(folderP).isSymbolicLink()) continue;
+        } catch {
+          continue;
+        }
+        const relPosix = path.relative(wsPath, folderP).replace(/\\/g, '/');
+        if (!relPosix || relPosix.startsWith('..')) continue;
+
         const parts = folderP.split(path.sep);
         if (parts.includes('.kilo') || parts.includes('worktrees')) {
           continue;
@@ -783,10 +1129,23 @@ print(json.dumps({"ws_uuid": ws_uuid, "projects": proj_rows, "other_ws": other_w
           continue;
         }
 
-        const hasIndex =
-          fs.existsSync(path.join(folderP, 'tasks', '00-INDEX.md')) ||
-          fs.existsSync(path.join(folderP, 'tasks', 'AGENTS.md')) ||
-          fs.existsSync(path.join(folderP, 'tasks', 'CONTEXT.md'));
+        if (discFilter.canPruneDir(relPosix, d)) {
+          continue;
+        }
+
+        const tasksDir = path.join(folderP, 'tasks');
+        const indexFile = path.join(tasksDir, '00-INDEX.md');
+        let hasIndex = false;
+        try {
+          hasIndex =
+            fs.existsSync(tasksDir) &&
+            !fs.lstatSync(tasksDir).isSymbolicLink() &&
+            fs.existsSync(indexFile) &&
+            !fs.lstatSync(indexFile).isSymbolicLink() &&
+            fs.statSync(indexFile).isFile();
+        } catch {
+          hasIndex = false;
+        }
         if (hasIndex) {
           candidateFolders.push(folderP);
         }
@@ -797,12 +1156,19 @@ print(json.dumps({"ws_uuid": ws_uuid, "projects": proj_rows, "other_ws": other_w
 
     walk(wsPath);
 
-    const innerCandidates = candidateFolders.filter((f) => f !== wsPath);
+    const filteredCandidates = candidateFolders.filter((f) => {
+      if (f === wsPath) return true;
+      const relPosix = path.relative(wsPath, f).replace(/\\/g, '/');
+      const base = path.basename(f);
+      return discFilter.allowsProject(relPosix, base, sanitizeSlug(base));
+    });
+
+    const innerCandidates = filteredCandidates.filter((f) => f !== wsPath);
     if (innerCandidates.length > 0) {
       const usedSlugs = new Set<string>();
       const projects: ProjectInfo[] = [];
 
-      const sortedCandidates = [...candidateFolders].sort((a, b) => {
+      const sortedCandidates = [...filteredCandidates].sort((a, b) => {
         const aOrder = a === wsPath ? 0 : 1;
         const bOrder = b === wsPath ? 0 : 1;
         if (aOrder !== bOrder) return aOrder - bOrder;

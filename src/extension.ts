@@ -404,29 +404,60 @@ export function activate(context: vscode.ExtensionContext) {
         return a.p.id.localeCompare(b.p.id);
       });
 
-      const items: Array<{ label: string; description?: string; detail?: string; projectId: string | null }> = [
-        {
-          label: `All projects (${projects.length}) — ${totals.nonClosed} (waiting: ${totals.waiting}, open: ${totals.open}, progress: ${totals.progress})`,
-          description: 'Common workspace view',
-          detail: !current ? '(Currently selected)' : undefined,
-          projectId: null,
-        },
-        ...projWithStats.map(({ p, stats }) => ({
-          label: `${p.id} — ${stats.nonClosed} (waiting: ${stats.waiting}, open: ${stats.open}, progress: ${stats.progress})`,
-          description: p.path,
-          detail: current === p.id ? '(Currently selected)' : undefined,
-          projectId: p.id,
-        })),
-      ];
+      const isEmptyProj = (x: { p: (typeof projects)[number]; stats: ReturnType<typeof getProjStats> }) =>
+        x.p.kind !== '_workspace' && x.stats.nonClosed === 0;
+      const emptyCount = projWithStats.filter(isEmptyProj).length;
+      let showEmpty = false;
 
-      const picked = await vscode.window.showQuickPick(items, {
-        placeHolder: 'Filter tree views by project',
-        title: 'AI Orchestration: Select Project',
-      });
+      while (true) {
+        const nonEmpty = projWithStats.filter((x) => !isEmptyProj(x) || x.p.id === current);
+        const visibleList = showEmpty || nonEmpty.length === 0 ? projWithStats : nonEmpty;
+        const allCountLabel =
+          !showEmpty && emptyCount > 0 && visibleList.length < projects.length
+            ? `${visibleList.length}/${projects.length}`
+            : `${projects.length}`;
 
-      if (!picked) return;
-      await workspaceManager.setSelectedProject(picked.projectId);
-      refreshAll();
+        const items: Array<{ label: string; description?: string; detail?: string; projectId: string | null }> = [
+          {
+            label: `All projects (${allCountLabel}) — ${totals.nonClosed} (waiting: ${totals.waiting}, open: ${totals.open}, progress: ${totals.progress})`,
+            description: 'Common workspace view',
+            detail: !current ? '(Currently selected)' : undefined,
+            projectId: null,
+          },
+          ...visibleList.map(({ p, stats }) => ({
+            label: `${p.id} — ${stats.nonClosed} (waiting: ${stats.waiting}, open: ${stats.open}, progress: ${stats.progress})`,
+            description: p.path,
+            detail: current === p.id ? '(Currently selected)' : undefined,
+            projectId: p.id,
+          })),
+        ];
+
+        if (emptyCount > 0) {
+          items.push({
+            label: showEmpty
+              ? `$(eye-closed) Hide empty projects (${emptyCount})`
+              : `$(eye) Show empty projects (+${emptyCount})`,
+            description: showEmpty
+              ? 'Hide projects with 0 active tasks'
+              : 'Include projects with 0 active tasks',
+            projectId: '__toggle_empty__',
+          });
+        }
+
+        const picked = await vscode.window.showQuickPick(items, {
+          placeHolder: 'Filter tree views by project',
+          title: 'AI Orchestration: Select Project',
+        });
+
+        if (!picked) return;
+        if (picked.projectId === '__toggle_empty__') {
+          showEmpty = !showEmpty;
+          continue;
+        }
+        await workspaceManager.setSelectedProject(picked.projectId);
+        refreshAll();
+        return;
+      }
     }),
 
     vscode.commands.registerCommand('aiOrchestration.openDecision', async (questionId?: string) => {
