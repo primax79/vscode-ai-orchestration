@@ -246,11 +246,15 @@ export class TaskTreeProvider implements vscode.TreeDataProvider<vscode.TreeItem
     const initiatives = result.initiatives || [];
 
     if (this.viewType === 'nextUp') {
-      const nextUps = allTasks.filter((t) => t.next_up === 'yes' && t.state !== 'done');
+      const isInactiveOrPaused = (st?: string) => {
+        const s = String(st || '').trim().toLowerCase();
+        return s === 'done' || s.startsWith('done with a caveat') || s === 'dropped' || s === 'paused';
+      };
+      const nextUps = allTasks.filter((t) => t.next_up === 'yes' && !isInactiveOrPaused(t.state));
       if (nextUps.length > 0) {
         return nextUps.map((t) => new TaskTreeItem(t, projectRoot, projectPrefix));
       }
-      const active = allTasks.filter((t) => t.state !== 'done');
+      const active = allTasks.filter((t) => !isInactiveOrPaused(t.state));
       if (active.length === 0) {
         const allDone = new vscode.TreeItem('All tasks completed!');
         allDone.iconPath = new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('charts.green'));

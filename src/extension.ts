@@ -378,7 +378,7 @@ export function activate(context: vscode.ExtensionContext) {
       const projectCounts = await Promise.all(projects.map((p) => resolver.getProjectCounts(p, runCli)));
       const getProjStats = (c?: Record<string, number>) => {
         const counts = c || {};
-        const waiting = (counts.waiting || 0) + (counts.blocked || 0) + (counts.paused || 0);
+        const waiting = (counts.waiting || 0) + (counts.blocked || 0);
         const open = (counts.open || 0) + (counts.todo || 0) + (counts.bounced || 0);
         const progress = (counts['in progress'] || 0) + (counts.in_progress || 0) + (counts.delivered || 0) + (counts.verified || 0);
         const nonClosed = waiting + open + progress;
