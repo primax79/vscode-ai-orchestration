@@ -991,10 +991,12 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
   createUseCase: (payload, root) => {
     const args = [
       'use-cases', 'create',
-      '--id', String(payload?.id),
       '--title', String(payload?.title),
       '--tasks-dir', path.join(root, 'tasks'),
     ];
+    // Empty id: the engine assigns the next free UC### on save.
+    const ucId = String(payload?.id ?? '').trim();
+    if (ucId) args.push('--id', ucId);
     if (payload?.actor) args.push('--actor', String(payload.actor));
     if (payload?.status) args.push('--status', String(payload.status));
     if (payload?.priority) args.push('--priority', String(payload.priority));
