@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
-import { CliClient, CliError } from '../cli-client';
+import { CliClient, CliError, mapCliStatus } from '../cli-client';
 import {
   ProjectInfo,
   ProjectResolver,
@@ -417,12 +417,260 @@ export function extractLabels(val: any): string[] {
 }
 
 const TASK_MUTATION_ID_RE = TREE_NODE_ID_RE;
+export const VALIDATE_CLOSE_ID_RE = /^(T\d{3,}(\.\d+)*|\d{2,}(\.\d+)*)$/;
 const mutationTaskId = requireTreeNodeId;
 const depIds = (v: any): string[] =>
   (Array.isArray(v) ? v : v ? [v] : [])
+    .filter((x: any) => x !== undefined && x !== null)
     .flatMap((x: any) => String(x).split(/[\s,]+/))
     .map((x: string) => x.trim())
     .filter(Boolean);
+
+export function extractValidateCloseTaskIds(payload: any): string[] {
+  let raw = payload?.task_ids;
+  if (raw === undefined || raw === null) {
+    raw = payload?.tasks;
+  }
+  if ((raw === undefined || raw === null) && payload?.task_id) {
+    raw = [payload.task_id];
+  }
+  if ((raw === undefined || raw === null) && payload?.id) {
+    raw = [payload.id];
+  }
+  const ids = depIds(raw);
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const tid of ids) {
+    if (!seen.has(tid)) {
+      seen.add(tid);
+      ordered.push(tid);
+    }
+  }
+  return ordered;
+}
+
+export function computeValidateClosePlanHash(
+  items: Array<{ id: string; state: string; task_hash?: string }>
+): string {
+  const canonical = items.map((it) => ({
+    id: String(it.id),
+    state: String(it.state),
+    task_hash: String(it.task_hash || ''),
+  }));
+  const payload = JSON.stringify(canonical);
+  return crypto.createHash('sha256').update(payload, 'utf8').digest('hex');
+}
+
+function throwValidateCloseError(status: number, payload: any): never {
+  const msg =
+    payload && typeof payload === 'object' && (payload.error || payload.message)
+      ? String(payload.error || payload.message)
+      : `Request failed with status ${status}`;
+  const err: any = new Error(msg);
+  err.status = status;
+  err.data = payload;
+  throw err;
+}
+
+export async function inspectValidateCloseTasks(
+  panel: DashboardPanel,
+  tasksDir: string,
+  root: string,
+  taskIds: string[],
+  note: string | null = null
+): Promise<{ status: number; payload: any }> {
+  if (!taskIds || taskIds.length === 0) {
+    return { status: 400, payload: { ok: false, error: 'task_ids is required and must be non-empty' } };
+  }
+
+  for (const tid of taskIds) {
+    if (!VALIDATE_CLOSE_ID_RE.test(tid)) {
+      return { status: 400, payload: { ok: false, error: `Invalid task id '${tid}'` } };
+    }
+  }
+
+  let listData: any;
+  try {
+    listData = await panel.cliClient.runJsonCommand<any>(['tasks', 'list', '--tasks-dir', tasksDir], root);
+  } catch (e: any) {
+    const status = e instanceof CliError ? e.status : (e?.status || 500);
+    const data = e instanceof CliError ? e.data : e?.data;
+    return {
+      status,
+      payload: data && typeof data === 'object' ? data : { ok: false, error: e?.message || String(e) },
+    };
+  }
+
+  if (!listData || typeof listData !== 'object') {
+    return { status: 500, payload: { ok: false, error: String(listData) } };
+  }
+
+  const treeMap: Record<string, any> = listData.tree && typeof listData.tree === 'object' ? listData.tree : {};
+  const allTasksList: any[] = Array.isArray(listData.all_tasks)
+    ? listData.all_tasks
+    : Array.isArray(listData.emergent_tasks)
+      ? listData.emergent_tasks
+      : [];
+  const tasksById: Record<string, any> = {};
+  for (const t of allTasksList) {
+    if (t && typeof t === 'object' && t.id) {
+      tasksById[String(t.id)] = t;
+    }
+  }
+
+  const items: any[] = [];
+  const plan: any[] = [];
+
+  for (const tid of taskIds) {
+    const node = treeMap[tid] || tasksById[tid];
+    if (!node) {
+      return { status: 404, payload: { ok: false, task_id: tid, error: `Task '${tid}' not found` } };
+    }
+
+    if (node.is_container || node.is_leaf === false) {
+      return {
+        status: 400,
+        payload: {
+          ok: false,
+          task_id: tid,
+          error: `Task '${tid}' is a container with derived state; validate and close its leaf tasks instead.`,
+        },
+      };
+    }
+
+    const rawState = String(node.state || '').trim();
+    const canonState = String(node.canonical_state || canonicalizeTaskState(rawState)).trim().toLowerCase();
+    if (canonState !== 'delivered' && canonState !== 'verified') {
+      return {
+        status: 400,
+        payload: {
+          ok: false,
+          task_id: tid,
+          state: rawState,
+          error: `Task '${tid}' is in state '${rawState}'; only 'delivered' or 'verified' tasks can be validated and closed.`,
+        },
+      };
+    }
+
+    const cmd = [
+      'tasks', 'transition', tid, 'done',
+      '--verifier', 'owner',
+      '--dry-run',
+      '--tasks-dir', tasksDir,
+    ];
+    if (note) {
+      cmd.push('--reason', note);
+    }
+
+    let dryData: any;
+    try {
+      dryData = await panel.cliClient.runJsonCommand<any>(cmd, root);
+    } catch (e: any) {
+      const status = e instanceof CliError ? e.status : (e?.status || 500);
+      const data = e instanceof CliError ? e.data : e?.data;
+      const errMsg = data && typeof data === 'object' && data.error ? data.error : (e?.message || String(e));
+      return {
+        status,
+        payload: {
+          ok: false,
+          task_id: tid,
+          error: errMsg || `Dry-run transition failed for ${tid}`,
+        },
+      };
+    }
+
+    if (!dryData || typeof dryData !== 'object' || !dryData.ok) {
+      const errMsg = dryData && typeof dryData === 'object' && dryData.error ? dryData.error : String(dryData);
+      const status = mapCliStatus(1, dryData);
+      return {
+        status,
+        payload: {
+          ok: false,
+          task_id: tid,
+          error: errMsg || `Dry-run transition failed for ${tid}`,
+        },
+      };
+    }
+
+    const taskHash = String(
+      node.task_hash ||
+      node.bundle_sha256 ||
+      node.task_bundle_sha256 ||
+      dryData.task_hash ||
+      dryData.bundle_sha256 ||
+      ''
+    );
+    const title = String(node.title || tid);
+    const shortTitleStr = String(node.short_title || node.short || title);
+    let verifyBy: any =
+      node.verify_by ||
+      node['verify-by'] ||
+      (tasksById[tid] || {}).verify_by ||
+      (tasksById[tid] || {})['verify-by'] ||
+      null;
+    if (typeof verifyBy === 'string') {
+      verifyBy = verifyBy.trim();
+      if (!verifyBy || verifyBy === '-') {
+        verifyBy = null;
+      }
+    }
+
+    const pathSteps: string[] =
+      Array.isArray(dryData.path) && dryData.path.length > 0
+        ? dryData.path.map((s: any) => String(s))
+        : canonState === 'delivered'
+          ? ['delivered', 'verified', 'done']
+          : ['verified', 'done'];
+    const relPath = String(dryData.rel_path || node.rel_path || tid);
+    const pathStr = pathSteps.join(' -> ');
+
+    items.push({
+      id: tid,
+      task_id: tid,
+      title,
+      short_title: shortTitleStr,
+      state: canonState,
+      raw_state: rawState,
+      new_state: dryData.new_state || 'done',
+      verify_by: verifyBy,
+      verifier: 'owner',
+      path: pathSteps,
+      rel_path: relPath,
+      task_hash: taskHash,
+    });
+    plan.push({
+      action: 'modify',
+      task_id: tid,
+      path: relPath,
+      reason: `${tid} (${shortTitleStr}): ${pathStr} (verifier: owner)` + (note ? ` — ${note}` : ''),
+      current_state: canonState,
+      state: `${canonState} -> done`,
+      before_sha256: taskHash,
+    });
+  }
+
+  const planHash = computeValidateClosePlanHash(items);
+  const summary =
+    `Validate and close ${items.length} task(s) as \`owner\`: ` +
+    items.map((it) => `\`${it.id}\` (${it.short_title})`).join(', ');
+
+  return {
+    status: 200,
+    payload: {
+      ok: true,
+      dry_run: true,
+      tasks: items,
+      task_ids: items.map((it) => it.id),
+      count: items.length,
+      verifier: 'owner',
+      note,
+      plan,
+      plan_hash: planHash,
+      hash: planHash,
+      summary,
+    },
+  };
+}
 const mutationTail = (payload: any, preview: boolean): string[] => {
   const h = payload?.expect_task_hash || payload?.expect_hash;
   if (!preview && !h) throw new Error('expect_task_hash is required');
@@ -3253,6 +3501,170 @@ export const CUSTOM_HANDLERS: Record<string, CustomHandler> = {
     panel.postMessage({ type: 'changed', areas: ['config', 'orchestrator', 'events', 'sessions'] });
     return data;
   },
+  previewValidateClose: async (panel, payload, root) => {
+    const taskIds = extractValidateCloseTaskIds(payload);
+    const noteRaw = payload?.note !== undefined && payload?.note !== null ? payload.note : payload?.reason;
+    const note = noteRaw !== undefined && noteRaw !== null && String(noteRaw).trim() ? String(noteRaw).trim() : null;
+    const tasksDir = path.join(root, 'tasks');
+    const { status, payload: resultPayload } = await inspectValidateCloseTasks(panel, tasksDir, root, taskIds, note);
+    if (status !== 200) {
+      throwValidateCloseError(status, resultPayload);
+    }
+    return resultPayload;
+  },
+  applyValidateClose: async (panel, payload, root) => {
+    const taskIds = extractValidateCloseTaskIds(payload);
+    const noteRaw = payload?.note !== undefined && payload?.note !== null ? payload.note : payload?.reason;
+    const note = noteRaw !== undefined && noteRaw !== null && String(noteRaw).trim() ? String(noteRaw).trim() : null;
+
+    const expectPlanHash =
+      payload?.expect_plan_hash ||
+      payload?.expectPlanHash ||
+      payload?.expect_hash ||
+      payload?.expectHash ||
+      payload?.plan_hash ||
+      payload?.planHash ||
+      payload?.hash;
+    const expectTaskHashes =
+      payload?.expect_task_hashes ||
+      payload?.expectTaskHashes ||
+      payload?.task_hashes ||
+      payload?.taskHashes;
+
+    const tasksDir = path.join(root, 'tasks');
+    const { status, payload: previewPayload } = await inspectValidateCloseTasks(panel, tasksDir, root, taskIds, note);
+    if (status !== 200) {
+      if (
+        status === 400 &&
+        expectPlanHash &&
+        String(previewPayload?.error || '').includes("only 'delivered' or 'verified'")
+      ) {
+        throwValidateCloseError(409, {
+          ok: false,
+          error: `stale-plan: ${previewPayload?.error}`,
+          details: previewPayload,
+        });
+      }
+      throwValidateCloseError(status, previewPayload);
+    }
+
+    const currentPlanHash: string = previewPayload.plan_hash;
+    const items: any[] = previewPayload.tasks;
+
+    if (expectPlanHash) {
+      if (String(expectPlanHash).trim().toLowerCase() !== String(currentPlanHash).toLowerCase()) {
+        throwValidateCloseError(409, {
+          ok: false,
+          error: 'stale-plan: task states or hashes changed since preview',
+          expected: String(expectPlanHash).trim(),
+          actual: currentPlanHash,
+          tasks: items,
+          plan_hash: currentPlanHash,
+          hash: currentPlanHash,
+        });
+      }
+    }
+
+    if (expectTaskHashes && typeof expectTaskHashes === 'object' && !Array.isArray(expectTaskHashes)) {
+      for (const it of items) {
+        const tid = it.id;
+        const expH = expectTaskHashes[tid];
+        if (expH && String(expH).trim().toLowerCase() !== String(it.task_hash || '').toLowerCase()) {
+          throwValidateCloseError(409, {
+            ok: false,
+            task_id: tid,
+            error: 'stale-task: task hash changed since preview',
+            expected: String(expH).trim(),
+            actual: it.task_hash,
+          });
+        }
+      }
+    }
+
+    const results: any[] = [];
+    for (const it of items) {
+      const tid = it.id;
+      const cmd = [
+        'tasks', 'transition', tid, 'done',
+        '--verifier', 'owner',
+        '--tasks-dir', tasksDir,
+      ];
+      if (note) {
+        cmd.push('--reason', note);
+      }
+      if (it.task_hash) {
+        cmd.push('--expect-task-hash', String(it.task_hash));
+      }
+
+      let data: any;
+      try {
+        data = await panel.cliClient.runJsonCommand<any>(cmd, root);
+      } catch (e: any) {
+        const errStatus = e instanceof CliError ? e.status : (e?.status || 500);
+        const errData = e instanceof CliError ? e.data : e?.data;
+        const errMsg =
+          errData && typeof errData === 'object' && errData.error
+            ? errData.error
+            : e?.message || String(e);
+        throwValidateCloseError(errStatus, {
+          ok: false,
+          task_id: tid,
+          error: errMsg,
+          completed: results,
+          details: errData,
+        });
+      }
+
+      if (data && typeof data === 'object' && data.ok === false) {
+        const errStatus = mapCliStatus(1, data);
+        throwValidateCloseError(errStatus, {
+          ok: false,
+          task_id: tid,
+          error: data.error || `Transition failed for ${tid}`,
+          completed: results,
+          details: data,
+        });
+      }
+
+      const resItem = data && typeof data === 'object' ? data : { ok: true, task_id: tid, new_state: 'done' };
+      results.push(resItem);
+      if (panel.postMessage) {
+        panel.postMessage({
+          type: 'task_transitioned',
+          task_id: tid,
+          new_state: resItem.new_state || 'done',
+        });
+      }
+    }
+
+    let inSync = false;
+    try {
+      const checkData = await panel.cliClient.runJsonCommand<any>(
+        ['tasks', 'sync-index', '--tasks-dir', tasksDir, '--check'],
+        root
+      );
+      inSync = Boolean(checkData && typeof checkData === 'object' && checkData.in_sync);
+    } catch {}
+
+    if (panel.postMessage) {
+      panel.postMessage({ type: 'changed', areas: ['tasks'] });
+      panel.postMessage({ type: 'tasks_changed' });
+    }
+    if (panel.onTasksUpdated) {
+      panel.onTasksUpdated();
+    }
+
+    return {
+      ok: true,
+      applied: true,
+      count: results.length,
+      task_ids: items.map((it) => it.id),
+      verifier: 'owner',
+      note,
+      results,
+      index_in_sync: inSync,
+    };
+  },
 };
 
 export const HANDLER_MAP: Record<string, MessageHandler> = {
@@ -3270,7 +3682,7 @@ const INBOX_WRITE_TYPES = new Set([
   'acceptTriage',
 ]);
 
-const TASK_WRITE_TYPES = new Set([
+export const TASK_WRITE_TYPES = new Set([
   'deleteTaskAttachment',
   'setPriority',
   'setSize',
@@ -3285,6 +3697,7 @@ const TASK_WRITE_TYPES = new Set([
   'setShortTitle',
   'createMicrotask',
   'promoteMicrotask',
+  'applyValidateClose',
 ]);
 
 for (const [type, builder] of Object.entries(CLI_COMMAND_MAP)) {
