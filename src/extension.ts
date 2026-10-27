@@ -63,6 +63,11 @@ import {
   setShortArgs,
   SET_SHORT_ID_RE,
   requireSetShortId,
+  VALIDATE_CLOSE_ID_RE,
+  extractValidateCloseTaskIds,
+  computeValidateClosePlanHash,
+  inspectValidateCloseTasks,
+  TASK_WRITE_TYPES,
 } from './views/dashboard-panel';
 import { shortTitle, deriveShortTitle } from './short-title';
 import { WorkspaceManager, detectSharedWorkspaceRoot } from './workspace-manager';
@@ -172,6 +177,11 @@ export {
   setShortArgs,
   SET_SHORT_ID_RE,
   requireSetShortId,
+  VALIDATE_CLOSE_ID_RE,
+  extractValidateCloseTaskIds,
+  computeValidateClosePlanHash,
+  inspectValidateCloseTasks,
+  TASK_WRITE_TYPES,
   WorkspaceManager,
   detectSharedWorkspaceRoot,
   ProjectResolver,
