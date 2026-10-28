@@ -426,6 +426,32 @@ const depIds = (v: any): string[] =>
     .map((x: string) => x.trim())
     .filter(Boolean);
 
+// 17.9 parity: link/unlink use cases on a task (preview, then apply with the preview's plan hash).
+function taskUseCasesArgs(payload: any, root: string, isPreview: boolean): string[] {
+  const taskId = mutationTaskId(payload);
+  const action = payload?.action === 'unlink' ? 'unlink' : 'link';
+  const raw = payload?.use_cases ?? payload?.useCases;
+  const useCases = depIds(raw);
+  if (useCases.length === 0) {
+    const err: any = new Error('use_cases is required');
+    err.status = 400;
+    throw err;
+  }
+  const args = ['tasks', action, taskId, ...useCases, '--tasks-dir', path.join(root, 'tasks')];
+  if (isPreview) {
+    args.push('--preview');
+  } else {
+    const expectHash = payload?.expect_plan_hash || payload?.expectPlanHash;
+    if (!expectHash) {
+      const err: any = new Error('expect_plan_hash is required');
+      err.status = 400;
+      throw err;
+    }
+    args.push('--apply', '--expect-plan-hash', String(expectHash));
+  }
+  return args;
+}
+
 export function extractValidateCloseTaskIds(payload: any): string[] {
   let raw = payload?.task_ids;
   if (raw === undefined || raw === null) {
@@ -942,6 +968,7 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     const expectHash = payload?.expectTaskHash || payload?.expect_task_hash;
     if (expectHash) args.push('--expect-task-hash', String(expectHash));
     if (payload?.forceUnblock || payload?.force_unblock) args.push('--force-unblock');
+    if (payload?.ownerApproved || payload?.owner_approved) args.push('--owner-approved');
     return args;
   },
   previewSyncIndex: (payload, root) => ['tasks', 'sync-index', '--tasks-dir', path.join(root, 'tasks'), '--check'],
@@ -1269,8 +1296,12 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     const args = ['use-cases', 'validate', String(payload?.id || payload?.uc_id), '--tasks-dir', path.join(root, 'tasks')];
     if (payload?.timeout) args.push('--timeout', String(payload.timeout));
     if (payload?.actor) args.push('--actor', String(payload.actor));
+    if (payload?.force) args.push('--force');
     return args;
   },
+  getUseCaseQueue: (payload, root) => ['use-cases', 'queue', '--tasks-dir', path.join(root, 'tasks')],
+  previewTaskUseCases: (payload, root) => taskUseCasesArgs(payload, root, true),
+  applyTaskUseCases: (payload, root) => taskUseCasesArgs(payload, root, false),
   runValidationCampaign: (payload, root) => {
     const args = ['use-cases', 'campaign', '--tasks-dir', path.join(root, 'tasks')];
     if (payload?.filter_actor) args.push('--filter-actor', String(payload.filter_actor));
@@ -3690,6 +3721,7 @@ const INBOX_WRITE_TYPES = new Set([
 ]);
 
 export const TASK_WRITE_TYPES = new Set([
+  'applyTaskUseCases',
   'deleteTaskAttachment',
   'setPriority',
   'setSize',
