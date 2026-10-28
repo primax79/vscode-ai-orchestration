@@ -1228,6 +1228,13 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     const dependsOn = payload?.depends_on || payload?.dependsOn;
     if (dependsOn) args.push('--depends-on', String(dependsOn));
     if (payload?.decider) args.push('--decider', String(payload.decider));
+    // 17.4: optional kind and use-case links, passed through only when given.
+    if (payload?.kind) args.push('--kind', String(payload.kind));
+    const rawUseCases = payload?.use_cases ?? payload?.useCases;
+    const useCases = Array.isArray(rawUseCases)
+      ? rawUseCases.map((u: any) => String(u).trim()).filter(Boolean).join(',')
+      : rawUseCases ? String(rawUseCases).trim() : '';
+    if (useCases) args.push('--use-case', useCases);
     return args;
   },
   getUseCases: (payload, root) => {
