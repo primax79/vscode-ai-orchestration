@@ -452,6 +452,45 @@ function taskUseCasesArgs(payload: any, root: string, isPreview: boolean): strin
   return args;
 }
 
+// T086 parity: approve / deprecate / re-propose use cases (the UI acts for the owner).
+const USE_CASE_APPROVAL_ACTIONS = new Set(['approve', 'deprecate', 'propose']);
+const USE_CASE_ID_RE = /^UC\d{3,}$/;
+function useCaseApprovalArgs(payload: any, root: string, isPreview: boolean): string[] {
+  const action = String(payload?.action || '').trim().toLowerCase();
+  if (!USE_CASE_APPROVAL_ACTIONS.has(action)) {
+    const err: any = new Error(`Invalid action ${JSON.stringify(action)}, expected approve, deprecate or propose`);
+    err.status = 400;
+    throw err;
+  }
+  const ids = depIds(payload?.ids ?? (payload?.id ? [payload.id] : []));
+  for (const id of ids) {
+    if (!USE_CASE_ID_RE.test(id)) {
+      const err: any = new Error(`Invalid use case id ${JSON.stringify(id)}`);
+      err.status = 400;
+      throw err;
+    }
+  }
+  const args = ['use-cases', action, ...ids];
+  if (payload?.stage) args.push('--stage', String(payload.stage));
+  if (payload?.approval) args.push('--approval', String(payload.approval));
+  if (payload?.all) args.push('--all');
+  const reason = payload?.reason ? String(payload.reason).trim() : '';
+  if (reason) args.push('--reason', reason);
+  args.push('--by', 'owner', '--tasks-dir', path.join(root, 'tasks'));
+  if (isPreview) {
+    args.push('--preview');
+  } else {
+    const expectHash = payload?.expect_plan_hash || payload?.expectPlanHash;
+    if (!expectHash) {
+      const err: any = new Error('expect_plan_hash is required on apply');
+      err.status = 400;
+      throw err;
+    }
+    args.push('--apply', '--expect-plan-hash', String(expectHash));
+  }
+  return args;
+}
+
 export function extractValidateCloseTaskIds(payload: any): string[] {
   let raw = payload?.task_ids;
   if (raw === undefined || raw === null) {
@@ -1300,6 +1339,8 @@ export const CLI_COMMAND_MAP: Record<string, CliArgBuilder> = {
     return args;
   },
   getUseCaseQueue: (payload, root) => ['use-cases', 'queue', '--tasks-dir', path.join(root, 'tasks')],
+  previewUseCaseApproval: (payload, root) => useCaseApprovalArgs(payload, root, true),
+  applyUseCaseApproval: (payload, root) => useCaseApprovalArgs(payload, root, false),
   previewTaskUseCases: (payload, root) => taskUseCasesArgs(payload, root, true),
   applyTaskUseCases: (payload, root) => taskUseCasesArgs(payload, root, false),
   runValidationCampaign: (payload, root) => {
@@ -3722,6 +3763,7 @@ const INBOX_WRITE_TYPES = new Set([
 
 export const TASK_WRITE_TYPES = new Set([
   'applyTaskUseCases',
+  'applyUseCaseApproval',
   'deleteTaskAttachment',
   'setPriority',
   'setSize',
